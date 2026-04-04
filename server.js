@@ -84,8 +84,13 @@ async function syncBinance() {
     });
     const posData = await r1.json();
 
+    console.log('Binance positionRisk response type:', typeof posData, Array.isArray(posData));
+    console.log('Binance positionRisk response type:', typeof posData, Array.isArray(posData), posData?.code, posData?.msg);
     if(Array.isArray(posData)) {
-      posData.filter(p => parseFloat(p.positionAmt) !== 0).forEach(p => {
+      const nonZero = posData.filter(p => parseFloat(p.positionAmt) !== 0);
+      console.log(`Binance: ${posData.length} total positions, ${nonZero.length} non-zero`);
+      if(nonZero.length > 0) console.log('First position:', JSON.stringify(nonZero[0]).slice(0,200));
+      nonZero.forEach(p => {
         const size    = Math.abs(parseFloat(p.positionAmt));
         const entry   = parseFloat(p.entryPrice);
         const mark    = parseFloat(p.markPrice);
