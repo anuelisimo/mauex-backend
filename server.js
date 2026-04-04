@@ -483,6 +483,17 @@ syncAll(); // Run immediately on startup
 
 // ── REST API ──────────────────────────────────────────────────────────────────
 
+// Show server's outbound IP (useful for Binance IP whitelist)
+app.get('/myip', async (req, res) => {
+  try {
+    const r = await fetch('https://api.ipify.org?format=json');
+    const d = await r.json();
+    res.json({ ip: d.ip, note: 'Add this IP to Binance API whitelist to enable Futures' });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
 // Health check
 app.get('/health', (req, res) => {
   res.json({
