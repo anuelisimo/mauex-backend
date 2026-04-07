@@ -123,14 +123,23 @@ async function syncBinance() {
           ? (o.positionSide === 'LONG' ? 'long' : 'short')
           : (o.side === 'BUY' ? 'long' : 'short');
 
-        const pos = positions.find(p =>
-          p.symbol === o.symbol &&
-          (isHedge ? p.dir === oDir : true)
-        );
+        // In one-way mode: STOP/TP orders have OPPOSITE side to close the position
+        // e.g. SHORT position closed by BUY stop order
+        // Match by symbol; for hedge mode also match direction
+        let pos;
+        if (isHedge) {
+          pos = positions.find(p => p.symbol === o.symbol && p.dir === oDir);
+        } else {
+          // One-way: stop/tp orders are for closing, so opposite side
+          const closingDir = o.side === 'BUY' ? 'short' : 'long';
+          pos = positions.find(p =>
+            p.symbol === o.symbol &&
+            ((isStop || isTP) ? p.dir === closingDir : true)
+          );
+        }
+
         if (pos) {
-          // SL: take the price (all SLs for same position are same price)
           if (isStop) pos.sl = price;
-          // TP: collect all, sorted by distance from entry
           if (isTP) {
             if (!pos._tpList) pos._tpList = [];
             if (!pos._tpList.includes(price)) pos._tpList.push(price);
