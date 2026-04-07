@@ -191,6 +191,67 @@ app.get('/binance-orders', (req, res) => res.json({
   lastSync: state.lastSync,
 }));
 
+app.get('/binance-history', async (req, res) => {
+  const key = (process.env.BINANCE_KEY    || '').trim();
+  const sec = (process.env.BINANCE_SECRET || '').trim();
+  if (!key || !sec) return res.json({ trades: [], error: 'No keys' });
+
+  const startTs = parseInt(req.query.from) || new Date('2026-01-01').getTime();
+  const endTs   = parseInt(req.query.to)   || Date.now();
+  const trades  = [];
+
+  try {
+    const ts  = Date.now();
+    const q   = `startTime=${startTs}&endTime=${endTs}&limit=1000&timestamp=${ts}`;
+    const sig = hmac256(sec, q);
+    const r   = await safeFetch(
+      `https://fapi.binance.com/fapi/v1/userTrades?${q}&signature=${sig}`,
+      { headers: { 'X-MBX-APIKEY': key } }
+    );
+
+    if (!r.ok || !Array.isArray(r.data)) {
+      return res.json({ trades: [], error: `${r.status} ${r.raw || ''}` });
+    }
+
+    const byOrder = {};
+    r.data.forEach(t => {
+      if (!byOrder[t.orderId]) byOrder[t.orderId] = {
+        trades: [], symbol: t.symbol, side: t.side,
+        realizedPnl: 0, commission: 0, time: t.time
+      };
+      byOrder[t.orderId].trades.push(t);
+      byOrder[t.orderId].realizedPnl += parseFloat(t.realizedPnl);
+      byOrder[t.orderId].commission  += parseFloat(t.commission);
+    });
+
+    Object.values(byOrder).filter(o => o.realizedPnl !== 0).forEach(o => {
+      const pnl  = Math.round(o.realizedPnl * 100) / 100;
+      const fees = Math.round(o.commission  * 100) / 100;
+      trades.push({
+        exchangeSource: 'BINANCE',
+        exchangeId:     `bnb-${o.trades[0].orderId}`,
+        ticker:         o.symbol.replace('USDT','').replace('BUSD',''),
+        dir:            o.side === 'BUY' ? 'long' : 'short',
+        exchange:       'BINANCE',
+        type:           'futures',
+        entry:          parseFloat(o.trades[0]?.price) || 0,
+        closePrice:     parseFloat(o.trades[o.trades.length-1]?.price) || 0,
+        pnl:            pnl - fees,
+        fees,
+        posSize:        Math.abs(parseFloat(o.trades[0]?.quoteQty || 0)),
+        status:         'closed',
+        createdAt:      new Date(o.time).toISOString(),
+        closeDate:      new Date(o.time).toISOString().split('T')[0],
+        closeNotes:     'Importado de Binance Futures',
+      });
+    });
+
+    res.json({ trades, total: trades.length });
+  } catch(e) {
+    res.json({ trades: [], error: e.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 MAUex Binance server on port ${PORT}`);
   console.log(`   Key: ${process.env.BINANCE_KEY ? '✅' : '❌ not set'}`);
