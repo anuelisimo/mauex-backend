@@ -123,13 +123,17 @@ async function syncBinance() {
           ? (o.positionSide === 'LONG' ? 'long' : 'short')
           : (o.side === 'BUY' ? 'long' : 'short');
 
-        const pos = positions.find(p => p.symbol === o.symbol);
+        const pos = positions.find(p =>
+          p.symbol === o.symbol &&
+          (isHedge ? p.dir === oDir : true)
+        );
         if (pos) {
-          if (isStop && !pos.sl)  pos.sl  = price;
+          // SL: take the price (all SLs for same position are same price)
+          if (isStop) pos.sl = price;
+          // TP: collect all, sorted by distance from entry
           if (isTP) {
-            if (!pos.tp1)      pos.tp1 = price;
-            else if (!pos.tp2) pos.tp2 = price;
-            else if (!pos.tp3) pos.tp3 = price;
+            if (!pos._tpList) pos._tpList = [];
+            if (!pos._tpList.includes(price)) pos._tpList.push(price);
           }
         }
         if (isLim) {
@@ -143,6 +147,19 @@ async function syncBinance() {
             exchangeId: `bnb-ord-${o.orderId}`,
           });
         }
+      }
+    }
+
+    // Sort TPs by distance from entry and assign
+    for (const pos of positions) {
+      if (pos._tpList && pos._tpList.length) {
+        const sorted = pos._tpList.sort((a, b) =>
+          pos.dir === 'long' ? a - b : b - a
+        );
+        pos.tp1 = sorted[0] || null;
+        pos.tp2 = sorted[1] || null;
+        pos.tp3 = sorted[2] || null;
+        delete pos._tpList;
       }
     }
 
