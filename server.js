@@ -278,6 +278,96 @@ app.get('/binance-history', async (req, res) => {
   }
 });
 
+// Binance closed position history
+app.get('/binance-position-history', async (req, res) => {
+  const key = (process.env.BINANCE_KEY    || '').trim();
+  const sec = (process.env.BINANCE_SECRET || '').trim();
+  if (!key || !sec) return res.json({ trades: [], error: 'No keys' });
+
+  const startTs = parseInt(req.query.from) || new Date('2026-01-01').getTime();
+  const endTs   = parseInt(req.query.to)   || Date.now();
+  const trades  = [];
+
+  try {
+    // Binance futures income history — REALIZED_PNL type gives closed position PnL
+    const ts  = Date.now();
+    const q   = `incomeType=REALIZED_PNL&startTime=${startTs}&endTime=${endTs}&limit=1000&timestamp=${ts}`;
+    const sig = hmac256(sec, q);
+    const r   = await safeFetch(
+      `https://fapi.binance.com/fapi/v1/income?${q}&signature=${sig}`,
+      { headers: { 'X-MBX-APIKEY': key } }
+    );
+
+    if (!r.ok || !Array.isArray(r.data)) {
+      return res.json({ trades: [], error: `${r.status} ${r.raw || ''}` });
+    }
+
+    // Group by symbol to combine multiple partial closes
+    const bySymTime = {};
+    r.data.forEach(item => {
+      const key2 = `${item.symbol}-${item.tradeId}`;
+      if (!bySymTime[key2]) bySymTime[key2] = { ...item, income: 0 };
+      bySymTime[key2].income += parseFloat(item.income);
+    });
+
+    // Also get trade history for entry prices
+    const ts2  = Date.now();
+    const q2   = `startTime=${startTs}&endTime=${endTs}&limit=1000&timestamp=${ts2}`;
+    const sig2 = hmac256(sec, q2);
+    const r2   = await safeFetch(
+      `https://fapi.binance.com/fapi/v1/userTrades?${q2}&signature=${sig2}`,
+      { headers: { 'X-MBX-APIKEY': key } }
+    );
+
+    // Group trades by orderId
+    const byOrder = {};
+    if (r2.ok && Array.isArray(r2.data)) {
+      r2.data.forEach(t => {
+        if (!byOrder[t.orderId]) byOrder[t.orderId] = {
+          trades: [], symbol: t.symbol, side: t.side,
+          realizedPnl: 0, commission: 0, qty: 0, time: t.time,
+        };
+        byOrder[t.orderId].trades.push(t);
+        byOrder[t.orderId].realizedPnl += parseFloat(t.realizedPnl);
+        byOrder[t.orderId].commission  += parseFloat(t.commission);
+        byOrder[t.orderId].qty         += parseFloat(t.qty);
+      });
+
+      Object.values(byOrder)
+        .filter(o => o.realizedPnl !== 0)
+        .forEach(o => {
+          const pnl  = Math.round(o.realizedPnl * 100) / 100;
+          const fees = Math.round(o.commission  * 100) / 100;
+          const firstTrade = o.trades[0];
+          const lastTrade  = o.trades[o.trades.length - 1];
+          trades.push({
+            exchangeSource: 'BINANCE',
+            exchangeId:     `bnb-pos-${firstTrade.orderId}`,
+            ticker:         o.symbol.replace('USDT','').replace('BUSD',''),
+            dir:            o.side === 'BUY' ? 'long' : 'short',
+            exchange:       'BINANCE',
+            type:           'futures',
+            entry:          parseFloat(firstTrade.price) || 0,
+            closePrice:     parseFloat(lastTrade.price)  || 0,
+            pnl:            pnl - fees,
+            pnlRaw:         pnl,
+            fees,
+            posSize:        parseFloat(firstTrade.quoteQty || 0),
+            leverage:       1,
+            status:         'closed',
+            createdAt:      new Date(o.time).toISOString(),
+            closeDate:      new Date(o.time).toISOString().split('T')[0],
+            closeNotes:     'Importado de Binance Futures',
+          });
+        });
+    }
+
+    res.json({ trades, total: trades.length });
+  } catch(e) {
+    res.json({ trades: [], error: e.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 MAUex Binance server on port ${PORT}`);
   console.log(`   Key: ${process.env.BINANCE_KEY ? '✅' : '❌ not set'}`);
