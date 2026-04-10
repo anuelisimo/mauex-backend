@@ -158,6 +158,9 @@ async function syncBybit(env) {
           price:      parseFloat(o.price) || parseFloat(o.triggerPrice) || 0,
           origQty:    parseFloat(o.qty),
           size:       parseFloat(o.qty) * (parseFloat(o.price) || 0),
+          tp1:        parseFloat(o.takeProfit) || null,
+          sl:         parseFloat(o.stopLoss)   || null,
+          leverage:   parseInt(o.leverage)     || null,
           exchangeId: `bybit-ord-${o.orderId}`,
         });
       }
@@ -253,6 +256,9 @@ async function syncOKX(env) {
           price:      parseFloat(o.px) || 0,
           origQty:    parseFloat(o.sz),
           size:       parseFloat(o.sz) * (parseFloat(o.px) || 0),
+          tp1:        parseFloat(o.tpTriggerPx) || null,
+          sl:         parseFloat(o.slTriggerPx) || null,
+          leverage:   parseInt(o.lever) || null,
           exchangeId: `okx-ord-${o.ordId}`,
         });
       }
@@ -356,11 +362,23 @@ async function syncAll(env) {
     count: { positions: positions.length, orders: orders.length },
   };
 
-  // Save to KV
+  // Save to KV — only write if data changed (saves KV write quota)
   if (env.MAUEX_CACHE) {
-    await env.MAUEX_CACHE.put('summary', JSON.stringify(payload), {
-      expirationTtl: 300 // expire after 5 minutes if cron stops
-    });
+    const prev = await env.MAUEX_CACHE.get('summary');
+    const newStr = JSON.stringify(payload);
+    // Compare position count and total PnL to detect changes
+    let changed = true;
+    if (prev) {
+      try {
+        const prevData = JSON.parse(prev);
+        changed = prevData.count?.positions !== payload.count?.positions ||
+                  prevData.count?.orders    !== payload.count?.orders    ||
+                  Math.abs((prevData.totalPnl||0) - (payload.totalPnl||0)) > 0.5;
+      } catch(e) {}
+    }
+    if (changed) {
+      await env.MAUEX_CACHE.put('summary', newStr, { expirationTtl: 600 });
+    }
   }
 
   return payload;
@@ -564,6 +582,133 @@ export default {
       return json({ trades, summary, total: trades.length });
     }
 
+    // ── /position-history — fetch closed positions from exchanges ──────────────
+    if (url.pathname === '/position-history') {
+      const from = url.searchParams.get('from') || '2026-01-01';
+      const to   = url.searchParams.get('to')   || new Date().toISOString().split('T')[0];
+      const startTs = new Date(from).getTime();
+      const endTs   = new Date(to).getTime() + 86400000;
+
+      const trades  = [];
+      const summary = [];
+
+      // Bybit position history (much cleaner than trade fills)
+      const bybitKey = (env.BYBIT_KEY || '').trim();
+      const bybitSec = (env.BYBIT_SECRET || '').trim();
+      if (bybitKey && bybitSec) {
+        try {
+          const ts  = Date.now().toString();
+          const q   = `category=linear&startTime=${startTs}&endTime=${endTs}&limit=100`;
+          const msg = ts + bybitKey + '5000' + q;
+          const sig = await hmac256(bybitSec, msg);
+          const r   = await safeFetch(
+            `https://api.bybit.com/v5/position/closed-pnl?${q}`,
+            { headers: { 'X-BAPI-API-KEY': bybitKey, 'X-BAPI-TIMESTAMP': ts, 'X-BAPI-SIGN': sig, 'X-BAPI-RECV-WINDOW': '5000' } }
+          );
+          if (r.ok && r.data?.retCode === 0) {
+            const list = r.data.result?.list || [];
+            list.forEach(p => {
+              const pnl  = parseFloat(p.closedPnl);
+              const fees = parseFloat(p.cumEntryValue) * 0.00055; // approx
+              trades.push({
+                exchangeSource: 'BYBIT',
+                exchangeId:     `bybit-pos-${p.symbol}-${p.orderId}`,
+                ticker:         p.symbol.replace('USDT',''),
+                dir:            p.side === 'Buy' ? 'long' : 'short',
+                exchange:       'BYBIT',
+                type:           'futures',
+                entry:          parseFloat(p.avgEntryPrice) || 0,
+                closePrice:     parseFloat(p.avgExitPrice)  || 0,
+                pnl:            Math.round(pnl * 100) / 100,
+                fees:           Math.round(fees * 100) / 100,
+                posSize:        parseFloat(p.cumEntryValue) || 0,
+                leverage:       parseInt(p.leverage) || 1,
+                status:         'closed',
+                createdAt:      new Date(parseInt(p.createdTime)).toISOString(),
+                closeDate:      new Date(parseInt(p.updatedTime)).toISOString().split('T')[0],
+                closeNotes:     'Importado de Bybit (position history)',
+              });
+            });
+            summary.push(`✅ BYBIT: ${list.length} posiciones`);
+          } else {
+            summary.push(`⚠️ BYBIT: ${r.data?.retMsg || 'sin datos'}`);
+          }
+        } catch(e) { summary.push(`❌ BYBIT: ${e.message}`); }
+      }
+
+      // OKX position history
+      const okxKey  = (env.OKX_KEY || '').trim();
+      const okxSec  = (env.OKX_SECRET || '').trim();
+      const okxPass = (env.OKX_PASSPHRASE || '').trim();
+      if (okxKey && okxSec && okxPass) {
+        try {
+          const okxHdr = async (path) => {
+            const ts   = new Date().toISOString();
+            const key2 = await crypto.subtle.importKey('raw', new TextEncoder().encode(okxSec),
+              { name:'HMAC', hash:'SHA-256' }, false, ['sign']);
+            const sig  = await crypto.subtle.sign('HMAC', key2, new TextEncoder().encode(ts+'GET'+path));
+            const b64  = btoa(String.fromCharCode(...new Uint8Array(sig)));
+            return { 'OK-ACCESS-KEY': okxKey, 'OK-ACCESS-SIGN': b64,
+                     'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': okxPass,
+                     'Content-Type': 'application/json' };
+          };
+          // OKX closed positions
+          const path = `/api/v5/account/positions-history?instType=SWAP&mgnMode=isolated&limit=100`;
+          const r    = await safeFetch(`https://www.okx.com${path}`, { headers: await okxHdr(path) });
+          if (r.ok && r.data?.code === '0') {
+            const list = r.data.data || [];
+            // Filter by date range
+            const filtered = list.filter(p => {
+              const t = parseInt(p.uTime);
+              return t >= startTs && t <= endTs;
+            });
+            filtered.forEach(p => {
+              const pnl  = parseFloat(p.realizedPnl);
+              const fees = parseFloat(p.fee) || 0;
+              const ticker = p.instId.replace('-USDT-SWAP','').replace('-','');
+              trades.push({
+                exchangeSource: 'OKX',
+                exchangeId:     `okx-pos-${p.instId}-${p.uTime}`,
+                ticker,
+                dir:            parseFloat(p.pos) > 0 ? 'long' : 'short',
+                exchange:       'OKX',
+                type:           'futures',
+                entry:          parseFloat(p.openAvgPx) || 0,
+                closePrice:     parseFloat(p.closeAvgPx) || 0,
+                pnl:            Math.round(pnl * 100) / 100,
+                fees:           Math.round(Math.abs(fees) * 100) / 100,
+                posSize:        parseFloat(p.notionalUsd) || 0,
+                leverage:       parseInt(p.lever) || 1,
+                status:         'closed',
+                createdAt:      new Date(parseInt(p.cTime)).toISOString(),
+                closeDate:      new Date(parseInt(p.uTime)).toISOString().split('T')[0],
+                closeNotes:     'Importado de OKX (position history)',
+              });
+            });
+            summary.push(`✅ OKX: ${filtered.length} posiciones`);
+          } else {
+            summary.push(`⚠️ OKX: ${r.data?.msg || 'sin datos'}`);
+          }
+        } catch(e) { summary.push(`❌ OKX: ${e.message}`); }
+      }
+
+      // Binance via Railway
+      const railwayUrl = (env.RAILWAY_URL || '').trim();
+      if (railwayUrl) {
+        try {
+          const r = await safeFetch(`${railwayUrl}/binance-position-history?from=${startTs}&to=${endTs}`);
+          if (r.ok && r.data?.trades) {
+            trades.push(...r.data.trades);
+            summary.push(`✅ BINANCE: ${r.data.trades.length} posiciones`);
+          } else {
+            summary.push(`⚠️ BINANCE: ${r.data?.error || 'sin datos'}`);
+          }
+        } catch(e) { summary.push(`❌ BINANCE: ${e.message}`); }
+      }
+
+      return json({ trades, summary, total: trades.length });
+    }
+
     // ── Legacy proxy (for AI analysis charts, Yahoo Finance) ─────────────────
     const targetUrl = url.searchParams.get('url');
     if (targetUrl) {
@@ -571,6 +716,7 @@ export default {
         'api.binance.com', 'fapi.binance.com',
         'query1.finance.yahoo.com', 'query2.finance.yahoo.com',
         'api.alternative.me',
+        'contract.mexc.com',
       ];
       let targetDomain;
       try { targetDomain = new URL(targetUrl).hostname; } catch(e) {
