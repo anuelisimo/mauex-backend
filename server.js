@@ -104,13 +104,24 @@ async function syncBinance() {
       });
     }
 
-    // Open orders → attach SL/TP
+    // Build leverage map from positionRisk (already fetched in r1)
+    const leverageMap = {};
+    if (Array.isArray(r1.data)) {
+      for (const p of r1.data) {
+        leverageMap[p.symbol] = parseInt(p.leverage) || 1;
+      }
+    }
+
+    // Open orders → attach SL/TP to positions AND build pending order groups
     const ts2 = Date.now();
     const q2  = `timestamp=${ts2}`;
     const r2  = await safeFetch(
       `https://fapi.binance.com/fapi/v1/openOrders?${q2}&signature=${hmac256(sec,q2)}`,
       { headers: { 'X-MBX-APIKEY': key } }
     );
+
+    // pendingGroups: keyed by "SYMBOL-DIR" to group entry+SL+TPs together
+    const pendingGroups = {};
 
     if (r2.ok && Array.isArray(r2.data)) {
       for (const o of r2.data) {
@@ -119,25 +130,78 @@ async function syncBinance() {
         const isStop = type.includes('STOP');
         const isTP   = type.includes('TAKE_PROFIT');
         const isLim  = type === 'LIMIT';
-        const oDir   = isHedge
-          ? (o.positionSide === 'LONG' ? 'long' : 'short')
-          : (o.side === 'BUY' ? 'long' : 'short');
 
-        // In one-way mode: STOP/TP orders have OPPOSITE side to close the position
-        // e.g. SHORT position closed by BUY stop order
-        // Match by symbol; for hedge mode also match direction
+        // Direction: in hedge mode use positionSide; in one-way use side
+        // For LIMIT (entry): side tells us the direction directly
+        // For STOP/TP (closing): side is OPPOSITE to the position direction
+        let dir;
+        if (isHedge) {
+          dir = o.positionSide === 'LONG' ? 'long' : 'short';
+        } else {
+          if (isLim) {
+            dir = o.side === 'BUY' ? 'long' : 'short';
+          } else {
+            // closing order — opposite side = position direction
+            dir = o.side === 'BUY' ? 'short' : 'long';
+          }
+        }
+
+        const groupKey = `${o.symbol}-${dir}`;
+        if (!pendingGroups[groupKey]) {
+          pendingGroups[groupKey] = {
+            exchange: 'BINANCE',
+            ticker:   o.symbol.replace('USDT','').replace('BUSD',''),
+            symbol:   o.symbol,
+            dir,
+            leverage: leverageMap[o.symbol] || null,
+            entry:    null,
+            totalQty: 0,
+            totalSize: 0,
+            sl:       null,
+            _tpList:  [],
+            tp1: null, tp2: null, tp3: null,
+            status:   'PENDIENTE',
+          };
+        }
+
+        const g = pendingGroups[groupKey];
+
+        if (isLim) {
+          // Entry order — accumulate qty/size in case of multiple partials
+          const qty = parseFloat(o.origQty) || 0;
+          g.totalQty  += qty;
+          g.totalSize += qty * price;
+          // Use first entry price found (or average if multiple)
+          g.entry = g.totalQty > 0 ? g.totalSize / g.totalQty : price;
+        }
+
+        if (isStop && price > 0) {
+          // Keep the SL closest to entry (for shorts: lowest above entry; for longs: highest below entry)
+          if (!g.sl) {
+            g.sl = price;
+          } else {
+            g.sl = dir === 'long'
+              ? Math.max(g.sl, price)
+              : Math.min(g.sl, price);
+          }
+        }
+
+        if (isTP && price > 0) {
+          if (!g._tpList.includes(price)) g._tpList.push(price);
+        }
+
+        // Also attach SL/TP to open positions as before
+        const oDir = dir;
         let pos;
         if (isHedge) {
           pos = positions.find(p => p.symbol === o.symbol && p.dir === oDir);
         } else {
-          // One-way: stop/tp orders are for closing, so opposite side
           const closingDir = o.side === 'BUY' ? 'short' : 'long';
           pos = positions.find(p =>
             p.symbol === o.symbol &&
             ((isStop || isTP) ? p.dir === closingDir : true)
           );
         }
-
         if (pos) {
           if (isStop) pos.sl = price;
           if (isTP) {
@@ -145,18 +209,22 @@ async function syncBinance() {
             if (!pos._tpList.includes(price)) pos._tpList.push(price);
           }
         }
-        if (isLim) {
-          orders.push({
-            exchange: 'BINANCE', type,
-            ticker:     o.symbol.replace('USDT',''),
-            symbol:     o.symbol,
-            dir:        o.side === 'BUY' ? 'long' : 'short',
-            price, origQty: parseFloat(o.origQty),
-            size:       parseFloat(o.origQty) * price,
-            exchangeId: `bnb-ord-${o.orderId}`,
-          });
-        }
       }
+    }
+
+    // Finalize pending groups: sort TPs, assign tp1/2/3, only include groups with an entry
+    for (const g of Object.values(pendingGroups)) {
+      if (g.entry === null) continue; // no LIMIT order = skip (only SL/TP orphans)
+      if (g._tpList.length) {
+        const sorted = g._tpList.sort((a, b) => g.dir === 'long' ? a - b : b - a);
+        g.tp1 = sorted[0] || null;
+        g.tp2 = sorted[1] || null;
+        g.tp3 = sorted[2] || null;
+      }
+      delete g._tpList;
+      g.entry    = Math.round(g.entry    * 10000) / 10000;
+      g.totalSize = Math.round(g.totalSize * 100) / 100;
+      orders.push(g);
     }
 
     // Also fetch conditional orders (TP/SL combined orders — different endpoint)
