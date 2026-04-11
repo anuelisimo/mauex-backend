@@ -204,7 +204,7 @@ async function syncBinance() {
         }
       }
     } else {
-      console.log(`Algo orders: none or error — ${JSON.stringify(r3.data)?.slice(0,100)}`);
+      console.log(`Algo orders raw: status=${r3.status} ok=${r3.ok} data=${JSON.stringify(r3.data)?.slice(0,200)} raw=${r3.raw?.slice(0,200)}`);
     }
 
     // Sort TPs by distance from entry and assign
