@@ -240,6 +240,295 @@ setInterval(syncBinance, 10000);
 syncBinance();
 
 // ── Endpoints ─────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+// FILLS POLLING — detects trade executions and saves to Firestore
+// ═════════════════════════════════════════════════════════════════════════════
+
+// Track last processed fill time per exchange
+const lastFillTime = {
+  binance: Date.now() - 60000, // start 1 min ago
+  bybit:   Date.now() - 60000,
+  okx:     Date.now() - 60000,
+};
+
+async function pollBinanceFills() {
+  const key = (process.env.BINANCE_KEY    || '').trim();
+  const sec = (process.env.BINANCE_SECRET || '').trim();
+  if (!key || !sec) return;
+
+  try {
+    const since = lastFillTime.binance;
+    const ts    = Date.now();
+    const q     = `startTime=${since}&limit=100&timestamp=${ts}`;
+    const sig   = hmac256(sec, q);
+    const r     = await safeFetch(
+      `https://fapi.binance.com/fapi/v1/userTrades?${q}&signature=${sig}`,
+      { headers: { 'X-MBX-APIKEY': key } }
+    );
+
+    if (!r.ok || !Array.isArray(r.data)) return;
+    if (r.data.length === 0) return;
+
+    console.log(`Binance fills: ${r.data.length} new fills since ${new Date(since).toISOString()}`);
+
+    // Group fills by orderId
+    const byOrder = {};
+    r.data.forEach(f => {
+      if (!byOrder[f.orderId]) byOrder[f.orderId] = {
+        fills: [], symbol: f.symbol, side: f.side,
+        realizedPnl: 0, commission: 0, qty: 0,
+        time: f.time, orderId: f.orderId,
+      };
+      byOrder[f.orderId].fills.push(f);
+      byOrder[f.orderId].realizedPnl += parseFloat(f.realizedPnl || 0);
+      byOrder[f.orderId].commission  += parseFloat(f.commission  || 0);
+      byOrder[f.orderId].qty         += parseFloat(f.qty         || 0);
+    });
+
+    // Only process orders with realized PnL (closing trades)
+    const closingOrders = Object.values(byOrder).filter(o => o.realizedPnl !== 0);
+
+    for (const o of closingOrders) {
+      const pnl    = Math.round(o.realizedPnl * 100) / 100;
+      const fees   = Math.round(o.commission  * 100) / 100;
+      const ticker = o.symbol.replace('USDT','').replace('BUSD','');
+      const dir    = o.side === 'BUY' ? 'long' : 'short';
+      const price  = parseFloat(o.fills[o.fills.length-1]?.price) || 0;
+      const qty    = o.qty;
+      const notional = qty * price;
+
+      const trade = {
+        exchangeSource: 'BINANCE',
+        exchangeId:     `bnb-fill-${o.orderId}`,
+        ticker,
+        dir,
+        exchange:       'BINANCE',
+        type:           'futures',
+        closePrice:     price,
+        pnl:            pnl - fees,
+        pnlRaw:         pnl,
+        fees,
+        posSize:        Math.round(notional * 100) / 100,
+        qty:            qty,
+        status:         'pending_review',
+        closeDate:      new Date(o.time).toISOString().split('T')[0],
+        createdAt:      new Date(o.time).toISOString(),
+        closeNotes:     'Auto-detectado via fills',
+        source:         'auto',
+      };
+
+      await saveFillToFirestore(trade);
+    }
+
+    // Update last fill time to latest fill
+    lastFillTime.binance = Math.max(...r.data.map(f => f.time)) + 1;
+
+  } catch(e) {
+    console.error('Binance fills error:', e.message);
+  }
+}
+
+async function pollBybitFills() {
+  const key = (process.env.BYBIT_KEY || '').trim();
+  const sec = (process.env.BYBIT_SECRET || '').trim();
+  if (!key || !sec) return;
+
+  try {
+    const since = lastFillTime.bybit;
+    const ts    = Date.now().toString();
+    const q     = `category=linear&startTime=${since}&limit=100`;
+    const msg   = ts + key + '5000' + q;
+    const sig   = hmac256(sec, msg);
+
+    const r = await safeFetch(
+      `https://api.bybit.com/v5/execution/list?${q}`,
+      { headers: {
+        'X-BAPI-API-KEY': key, 'X-BAPI-TIMESTAMP': ts,
+        'X-BAPI-SIGN': sig, 'X-BAPI-RECV-WINDOW': '5000'
+      }}
+    );
+
+    if (!r.ok || r.data?.retCode !== 0) return;
+    const list = r.data.result?.list || [];
+    if (list.length === 0) return;
+
+    console.log(`Bybit fills: ${list.length} new fills`);
+
+    // Group by orderId
+    const byOrder = {};
+    list.forEach(f => {
+      if (!byOrder[f.orderId]) byOrder[f.orderId] = {
+        fills: [], symbol: f.symbol, side: f.side,
+        pnl: 0, fees: 0, qty: 0, time: parseInt(f.execTime),
+      };
+      byOrder[f.orderId].fills.push(f);
+      byOrder[f.orderId].pnl  += parseFloat(f.closedPnl || 0);
+      byOrder[f.orderId].fees += parseFloat(f.execFee   || 0);
+      byOrder[f.orderId].qty  += parseFloat(f.execQty   || 0);
+    });
+
+    const closingOrders = Object.values(byOrder).filter(o => o.pnl !== 0);
+
+    for (const o of closingOrders) {
+      const pnl    = Math.round(o.pnl  * 100) / 100;
+      const fees   = Math.round(Math.abs(o.fees) * 100) / 100;
+      const price  = parseFloat(o.fills[o.fills.length-1]?.execPrice) || 0;
+      const ticker = o.symbol.replace('USDT','');
+
+      const trade = {
+        exchangeSource: 'BYBIT',
+        exchangeId:     `bybit-fill-${o.fills[0].orderId}`,
+        ticker,
+        dir:            o.side === 'Buy' ? 'long' : 'short',
+        exchange:       'BYBIT',
+        type:           'futures',
+        closePrice:     price,
+        pnl:            pnl - fees,
+        pnlRaw:         pnl,
+        fees,
+        posSize:        price * o.qty,
+        qty:            o.qty,
+        status:         'pending_review',
+        closeDate:      new Date(o.time).toISOString().split('T')[0],
+        createdAt:      new Date(o.time).toISOString(),
+        closeNotes:     'Auto-detectado via fills',
+        source:         'auto',
+      };
+
+      await saveFillToFirestore(trade);
+    }
+
+    if (list.length > 0) {
+      lastFillTime.bybit = Math.max(...list.map(f => parseInt(f.execTime))) + 1;
+    }
+
+  } catch(e) {
+    console.error('Bybit fills error:', e.message);
+  }
+}
+
+async function pollOKXFills() {
+  const key  = (process.env.OKX_KEY        || '').trim();
+  const sec  = (process.env.OKX_SECRET     || '').trim();
+  const pass = (process.env.OKX_PASSPHRASE || '').trim();
+  if (!key || !sec || !pass) return;
+
+  try {
+    const path = '/api/v5/trade/fills?instType=SWAP&limit=100';
+    const ts   = new Date().toISOString();
+    const sig  = require('crypto')
+      .createHmac('sha256', sec)
+      .update(ts + 'GET' + path)
+      .digest('base64');
+
+    const r = await safeFetch(`https://www.okx.com${path}`, {
+      headers: {
+        'OK-ACCESS-KEY': key, 'OK-ACCESS-SIGN': sig,
+        'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': pass,
+        'Content-Type': 'application/json',
+      }
+    });
+
+    if (!r.ok || r.data?.code !== '0') return;
+    const list = (r.data.data || []).filter(f =>
+      parseInt(f.ts) > lastFillTime.okx && parseFloat(f.pnl || 0) !== 0
+    );
+    if (list.length === 0) return;
+
+    console.log(`OKX fills: ${list.length} new fills`);
+
+    for (const f of list) {
+      const pnl    = parseFloat(f.pnl  || 0);
+      const fees   = Math.abs(parseFloat(f.fee || 0));
+      const ticker = f.instId.replace('-USDT-SWAP','').replace('-','');
+      const price  = parseFloat(f.fillPx || 0);
+      const qty    = parseFloat(f.fillSz || 0);
+
+      const trade = {
+        exchangeSource: 'OKX',
+        exchangeId:     `okx-fill-${f.tradeId}`,
+        ticker,
+        dir:            f.side === 'buy' ? 'long' : 'short',
+        exchange:       'OKX',
+        type:           'futures',
+        closePrice:     price,
+        pnl:            Math.round((pnl - fees) * 100) / 100,
+        pnlRaw:         Math.round(pnl * 100) / 100,
+        fees:           Math.round(fees * 100) / 100,
+        posSize:        price * qty,
+        qty,
+        status:         'pending_review',
+        closeDate:      new Date(parseInt(f.ts)).toISOString().split('T')[0],
+        createdAt:      new Date(parseInt(f.ts)).toISOString(),
+        closeNotes:     'Auto-detectado via fills',
+        source:         'auto',
+      };
+
+      await saveFillToFirestore(trade);
+    }
+
+    if (list.length > 0) {
+      lastFillTime.okx = Math.max(...list.map(f => parseInt(f.ts))) + 1;
+    }
+
+  } catch(e) {
+    console.error('OKX fills error:', e.message);
+  }
+}
+
+// Save fill to Firestore (only if not already saved)
+async function saveFillToFirestore(trade) {
+  if (!db) return;
+  try {
+    const col  = db.collection('trades');
+    // Check if already exists
+    const snap = await col.where('exchangeId', '==', trade.exchangeId).limit(1).get();
+    if (!snap.empty) return; // Already saved
+
+    // Find user — get from sync doc
+    const syncDoc = await db.collection('sync').doc('latest').get();
+    const userId  = syncDoc.exists ? syncDoc.data()?.userId : null;
+    if (!userId) {
+      console.warn('No userId found for fill save');
+      return;
+    }
+
+    await col.add({ ...trade, userId });
+    console.log(`✅ Saved fill: ${trade.exchange} ${trade.ticker} PnL=${trade.pnl}`);
+  } catch(e) {
+    console.error('Firestore save error:', e.message);
+  }
+}
+
+// Poll fills every 30 seconds
+setInterval(async () => {
+  await Promise.all([
+    pollBinanceFills(),
+    pollBybitFills(),
+    pollOKXFills(),
+  ]);
+}, 30000);
+
+// Initial poll after 10 seconds
+setTimeout(async () => {
+  await Promise.all([
+    pollBinanceFills(),
+    pollBybitFills(),
+    pollOKXFills(),
+  ]);
+}, 10000);
+
+// Receive userId from frontend to associate fills
+app.post('/set-user', async (req, res) => {
+  const { userId } = req.body;
+  if (!userId) return res.json({ error: 'No userId' });
+  // Save userId to Firestore sync doc so fills can be attributed
+  if (db) {
+    await db.collection('sync').doc('latest').set({ userId }, { merge: true });
+  }
+  res.json({ ok: true });
+});
+
 app.get('/health', (req, res) => res.json({
   status:    'ok',
   lastSync:  state.lastSync,
