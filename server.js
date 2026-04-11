@@ -113,6 +113,12 @@ async function syncBinance() {
     );
 
     if (r2.ok && Array.isArray(r2.data)) {
+      console.log(`Open orders: ${r2.data.length} total`);
+      r2.data.forEach(o => {
+        if(['XVGUSDT','DOGEUSDT'].includes(o.symbol)) {
+          console.log(`  ${o.symbol} ${o.type} ${o.side} stopPrice=${o.stopPrice} price=${o.price} positionSide=${o.positionSide}`);
+        }
+      });
       for (const o of r2.data) {
         const price  = parseFloat(o.stopPrice) || parseFloat(o.price) || 0;
         const type   = o.type || '';
