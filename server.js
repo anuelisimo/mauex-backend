@@ -167,6 +167,7 @@ async function syncBinance() {
       { headers: { 'X-MBX-APIKEY': key } }
     );
 
+    console.log(`Conditional orders response: ok=${r3.ok} status=${r3.status} isArray=${Array.isArray(r3.data)} raw=${r3.raw||JSON.stringify(r3.data)?.slice(0,100)}`);
     if (r3.ok && Array.isArray(r3.data)) {
       console.log(`Conditional orders: ${r3.data.length} total`);
       for (const o of r3.data) {
