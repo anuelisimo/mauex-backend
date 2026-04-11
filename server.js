@@ -163,12 +163,13 @@ async function syncBinance() {
     const ts3 = Date.now();
     const q3  = `timestamp=${ts3}`;
     const r3  = await safeFetch(
-      `https://fapi.binance.com/fapi/v1/algo/openOrders?${q3}&signature=${hmac256(sec,q3)}`,
+      `https://fapi.binance.com/fapi/v1/openAlgoOrders?${q3}&signature=${hmac256(sec,q3)}`,
       { headers: { 'X-MBX-APIKEY': key } }
     );
 
-    if (r3.ok && r3.data?.total > 0) {
-      const algoOrders = r3.data.orders || [];
+    if (r3.ok && r3.data) {
+      const algoOrders = r3.data.orders || (Array.isArray(r3.data) ? r3.data : []);
+      console.log(`Algo orders: ${algoOrders.length} found`);
       console.log(`Algo orders: ${algoOrders.length} total`);
       for (const o of algoOrders) {
         const sym      = o.symbol;
