@@ -124,7 +124,7 @@ async function syncBinance() {
     const pendingGroups = {};
 
     if (r2.ok && Array.isArray(r2.data)) {
-      console.log('FULL ORDER[0]:', JSON.stringify(r2.data[0], null, 2)); r2.data.forEach((o,i) => console.log(`ORDER[${i}] ${o.symbol} ${o.type} ${o.side} price=${o.price} stopPrice=${o.stopPrice} takeProfitPrice=${o.takeProfitPrice} stopLossPrice=${o.stopLossPrice} origType=${o.origType} strategyType=${o.strategyType}`));
+      console.log('RAW orders sample:', JSON.stringify(r2.data.slice(0,4)));
       for (const o of r2.data) {
         const price  = parseFloat(o.stopPrice) || parseFloat(o.price) || 0;
         const type   = o.type || '';
@@ -227,6 +227,52 @@ async function syncBinance() {
       g.totalSize = Math.round(g.totalSize * 100) / 100;
       orders.push(g);
     }
+
+    // ── ATTEMPT: bapi strategy endpoint with API key ──────────────────────────
+    try {
+      const rStrat = await safeFetch(
+        'https://www.binance.com/bapi/futures/v1/private/future/strategy/query-open-strategy-batch',
+        {
+          method:  'POST',
+          headers: {
+            'X-MBX-APIKEY': key,
+            'Content-Type': 'application/json',
+            'clienttype':   'web',
+            'lang':         'en',
+          },
+          body: '{}',
+        }
+      );
+      console.log(`BAPI strategy: status=${rStrat.status} ok=${rStrat.ok}`);
+      console.log(`BAPI strategy raw: ${JSON.stringify(rStrat.data)?.slice(0,500)}`);
+
+      if (rStrat.ok && rStrat.data?.success && rStrat.data?.data?.strategyOrders) {
+        const strategyOrders = rStrat.data.data.strategyOrders;
+        console.log(`BAPI strategy: ${strategyOrders.length} strategies found`);
+        for (const strat of strategyOrders) {
+          const subOrders = strat.subOrders || [];
+          const entryOrder = subOrders.find(s => s.type === 'LIMIT' && s.status === 'NEW');
+          if (!entryOrder) continue;
+          const sym = entryOrder.symbol;
+          const dir = entryOrder.side === 'SELL' ? 'short' : 'long';
+          const g   = orders.find(o => o.symbol === sym && o.dir === dir);
+          if (!g) continue;
+          const tpList = subOrders
+            .filter(s => s.type === 'TAKE_PROFIT_MARKET' && parseFloat(s.stopPrice) > 0)
+            .map(s => parseFloat(s.stopPrice))
+            .sort((a, b) => dir === 'long' ? a - b : b - a);
+          const slSub = subOrders.find(s => s.type === 'STOP_MARKET' && parseFloat(s.stopPrice) > 0);
+          if (slSub)   g.sl  = parseFloat(slSub.stopPrice);
+          if (tpList[0]) g.tp1 = tpList[0];
+          if (tpList[1]) g.tp2 = tpList[1];
+          if (tpList[2]) g.tp3 = tpList[2];
+          console.log(`Strategy enriched: ${sym} ${dir} sl=${g.sl} tp1=${g.tp1} tp2=${g.tp2} tp3=${g.tp3}`);
+        }
+      }
+    } catch(e) {
+      console.log(`BAPI strategy error: ${e.message}`);
+    }
+
 
     // Also fetch conditional orders (TP/SL combined orders — different endpoint)
     const ts3 = Date.now();
