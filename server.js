@@ -124,6 +124,7 @@ async function syncBinance() {
     const pendingGroups = {};
 
     if (r2.ok && Array.isArray(r2.data)) {
+      console.log('RAW orders sample:', JSON.stringify(r2.data.slice(0,4)));
       for (const o of r2.data) {
         const price  = parseFloat(o.stopPrice) || parseFloat(o.price) || 0;
         const type   = o.type || '';
