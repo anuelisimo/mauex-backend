@@ -173,35 +173,37 @@ async function syncBinance() {
       console.log(`Algo orders: ${algoOrders.length} total`);
       for (const o of algoOrders) {
         const sym      = o.symbol;
-        // Each algo order has tpTriggerPrice and slTriggerPrice
-        const tpPrice  = parseFloat(o.tpTriggerPrice || 0);
-        const slPrice  = parseFloat(o.slTriggerPrice || o.triggerPrice || 0);
-        const isTP     = o.orderType === 'TAKE_PROFIT' || o.orderType === 'TAKE_PROFIT_MARKET';
-        const isSL     = o.orderType === 'STOP' || o.orderType === 'STOP_MARKET';
+        // triggerPrice is the key field — orderType tells us if it's TP or SL
+        const triggerPrice = parseFloat(o.triggerPrice || 0);
+        const isTP = o.orderType === 'TAKE_PROFIT' || o.orderType === 'TAKE_PROFIT_MARKET';
+        const isSL = o.orderType === 'STOP'        || o.orderType === 'STOP_MARKET';
 
+        // In one-way mode, closing orders have opposite side
         const closingDir = o.side === 'BUY' ? 'short' : 'long';
         const pos = positions.find(p => p.symbol === sym && p.dir === closingDir);
 
-        if (pos) {
-          // If it's a combined TP/SL order
-          if (tpPrice > 0) {
+        if (pos && triggerPrice > 0) {
+          if (isTP) {
             if (!pos._tpList) pos._tpList = [];
-            if (!pos._tpList.includes(tpPrice)) pos._tpList.push(tpPrice);
+            if (!pos._tpList.includes(triggerPrice)) pos._tpList.push(triggerPrice);
           }
-          if (slPrice > 0 && (isSL || slPrice !== tpPrice)) {
-            pos.sl = slPrice;
+          if (isSL) {
+            // For LONG: SL must be BELOW entry — keep highest below entry (closest)
+            // For SHORT: SL must be ABOVE entry — keep lowest above entry (closest)
+            const entry = pos.entry || 0;
+            const validSL = closingDir === 'long'
+              ? triggerPrice < entry   // SL must be below entry for LONG
+              : triggerPrice > entry;  // SL must be above entry for SHORT
+            if (validSL) {
+              if (!pos.sl) {
+                pos.sl = triggerPrice;
+              } else {
+                pos.sl = closingDir === 'long'
+                  ? Math.max(pos.sl, triggerPrice)  // closest to entry = highest
+                  : Math.min(pos.sl, triggerPrice); // closest to entry = lowest
+              }
+            }
           }
-          // Single TP order
-          if (isTP && o.triggerPrice) {
-            const tp = parseFloat(o.triggerPrice);
-            if (!pos._tpList) pos._tpList = [];
-            if (!pos._tpList.includes(tp)) pos._tpList.push(tp);
-          }
-          // Single SL order
-          if (isSL && o.triggerPrice) {
-            pos.sl = parseFloat(o.triggerPrice);
-          }
-          console.log(`  Algo ${sym} ${o.orderType}: triggerPrice=${o.triggerPrice} tpTrigger=${o.tpTriggerPrice} slTrigger=${o.slTriggerPrice}`);
         }
       }
     } else {
