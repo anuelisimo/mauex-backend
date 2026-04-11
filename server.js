@@ -113,12 +113,6 @@ async function syncBinance() {
     );
 
     if (r2.ok && Array.isArray(r2.data)) {
-      console.log(`Open orders: ${r2.data.length} total`);
-      r2.data.forEach(o => {
-        if(['XVGUSDT','DOGEUSDT'].includes(o.symbol)) {
-          console.log(`  ${o.symbol} ${o.type} ${o.side} stopPrice=${o.stopPrice} price=${o.price} positionSide=${o.positionSide}`);
-        }
-      });
       for (const o of r2.data) {
         const price  = parseFloat(o.stopPrice) || parseFloat(o.price) || 0;
         const type   = o.type || '';
@@ -161,6 +155,43 @@ async function syncBinance() {
             size:       parseFloat(o.origQty) * price,
             exchangeId: `bnb-ord-${o.orderId}`,
           });
+        }
+      }
+    }
+
+    // Also fetch conditional orders (TP/SL combined orders — different endpoint)
+    const ts3 = Date.now();
+    const q3  = `timestamp=${ts3}`;
+    const r3  = await safeFetch(
+      `https://fapi.binance.com/fapi/v1/conditional/openOrders?${q3}&signature=${hmac256(sec,q3)}`,
+      { headers: { 'X-MBX-APIKEY': key } }
+    );
+
+    if (r3.ok && Array.isArray(r3.data)) {
+      console.log(`Conditional orders: ${r3.data.length} total`);
+      for (const o of r3.data) {
+        const sym    = o.symbol;
+        const tp     = parseFloat(o.activatePrice) || parseFloat(o.stopPrice) || 0;
+        const sl     = parseFloat(o.stopPrice) || 0;
+        const tpVal  = parseFloat(o.priceProtect ? o.activatePrice : 0) || 0;
+
+        // Conditional order has both TP and SL in one order
+        // Fields: activatePrice (TP trigger), stopPrice (SL trigger)
+        const tpPrice = parseFloat(o.takeProfit?.triggerPrice || o.triggerPrice || 0);
+        const slPrice = parseFloat(o.stopLoss?.triggerPrice   || o.stopPrice    || 0);
+
+        const closingDir = o.side === 'BUY' ? 'short' : 'long';
+        const pos = positions.find(p =>
+          p.symbol === sym && p.dir === closingDir
+        );
+
+        if (pos) {
+          if (slPrice && slPrice > 0) pos.sl = slPrice;
+          if (tpPrice && tpPrice > 0) {
+            if (!pos._tpList) pos._tpList = [];
+            if (!pos._tpList.includes(tpPrice)) pos._tpList.push(tpPrice);
+          }
+          console.log(`  Conditional ${sym}: TP=${tpPrice} SL=${slPrice} → pos ${pos.dir}`);
         }
       }
     }
