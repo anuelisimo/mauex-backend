@@ -124,7 +124,7 @@ async function syncBinance() {
     const pendingGroups = {};
 
     if (r2.ok && Array.isArray(r2.data)) {
-      console.log('RAW orders sample:', JSON.stringify(r2.data.slice(0,4)));
+      console.log('FULL ORDER[0]:', JSON.stringify(r2.data[0], null, 2)); r2.data.forEach((o,i) => console.log(`ORDER[${i}] ${o.symbol} ${o.type} ${o.side} price=${o.price} stopPrice=${o.stopPrice} takeProfitPrice=${o.takeProfitPrice} stopLossPrice=${o.stopLossPrice} origType=${o.origType} strategyType=${o.strategyType}`));
       for (const o of r2.data) {
         const price  = parseFloat(o.stopPrice) || parseFloat(o.price) || 0;
         const type   = o.type || '';
