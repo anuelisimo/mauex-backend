@@ -163,38 +163,48 @@ async function syncBinance() {
     const ts3 = Date.now();
     const q3  = `timestamp=${ts3}`;
     const r3  = await safeFetch(
-      `https://fapi.binance.com/fapi/v1/conditional/openOrders?${q3}&signature=${hmac256(sec,q3)}`,
+      `https://fapi.binance.com/fapi/v1/algo/openOrders?${q3}&signature=${hmac256(sec,q3)}`,
       { headers: { 'X-MBX-APIKEY': key } }
     );
 
-    console.log(`Conditional orders response: ok=${r3.ok} status=${r3.status} isArray=${Array.isArray(r3.data)} raw=${r3.raw||JSON.stringify(r3.data)?.slice(0,100)}`);
-    if (r3.ok && Array.isArray(r3.data)) {
-      console.log(`Conditional orders: ${r3.data.length} total`);
-      for (const o of r3.data) {
-        const sym    = o.symbol;
-        const tp     = parseFloat(o.activatePrice) || parseFloat(o.stopPrice) || 0;
-        const sl     = parseFloat(o.stopPrice) || 0;
-        const tpVal  = parseFloat(o.priceProtect ? o.activatePrice : 0) || 0;
-
-        // Conditional order has both TP and SL in one order
-        // Fields: activatePrice (TP trigger), stopPrice (SL trigger)
-        const tpPrice = parseFloat(o.takeProfit?.triggerPrice || o.triggerPrice || 0);
-        const slPrice = parseFloat(o.stopLoss?.triggerPrice   || o.stopPrice    || 0);
+    if (r3.ok && r3.data?.total > 0) {
+      const algoOrders = r3.data.orders || [];
+      console.log(`Algo orders: ${algoOrders.length} total`);
+      for (const o of algoOrders) {
+        const sym      = o.symbol;
+        // Each algo order has tpTriggerPrice and slTriggerPrice
+        const tpPrice  = parseFloat(o.tpTriggerPrice || 0);
+        const slPrice  = parseFloat(o.slTriggerPrice || o.triggerPrice || 0);
+        const isTP     = o.orderType === 'TAKE_PROFIT' || o.orderType === 'TAKE_PROFIT_MARKET';
+        const isSL     = o.orderType === 'STOP' || o.orderType === 'STOP_MARKET';
 
         const closingDir = o.side === 'BUY' ? 'short' : 'long';
-        const pos = positions.find(p =>
-          p.symbol === sym && p.dir === closingDir
-        );
+        const pos = positions.find(p => p.symbol === sym && p.dir === closingDir);
 
         if (pos) {
-          if (slPrice && slPrice > 0) pos.sl = slPrice;
-          if (tpPrice && tpPrice > 0) {
+          // If it's a combined TP/SL order
+          if (tpPrice > 0) {
             if (!pos._tpList) pos._tpList = [];
             if (!pos._tpList.includes(tpPrice)) pos._tpList.push(tpPrice);
           }
-          console.log(`  Conditional ${sym}: TP=${tpPrice} SL=${slPrice} → pos ${pos.dir}`);
+          if (slPrice > 0 && (isSL || slPrice !== tpPrice)) {
+            pos.sl = slPrice;
+          }
+          // Single TP order
+          if (isTP && o.triggerPrice) {
+            const tp = parseFloat(o.triggerPrice);
+            if (!pos._tpList) pos._tpList = [];
+            if (!pos._tpList.includes(tp)) pos._tpList.push(tp);
+          }
+          // Single SL order
+          if (isSL && o.triggerPrice) {
+            pos.sl = parseFloat(o.triggerPrice);
+          }
+          console.log(`  Algo ${sym} ${o.orderType}: triggerPrice=${o.triggerPrice} tpTrigger=${o.tpTriggerPrice} slTrigger=${o.slTriggerPrice}`);
         }
       }
+    } else {
+      console.log(`Algo orders: none or error — ${JSON.stringify(r3.data)?.slice(0,100)}`);
     }
 
     // Sort TPs by distance from entry and assign
