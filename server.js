@@ -30,7 +30,7 @@ try {
   db = admin.firestore();
   console.log('✅ Firebase Admin connected');
 } catch(e) {
-  console.warn('⚠️ Firebase Admin not available:', e.message);
+  console.error('❌ Firebase Admin error:', e.message, e.stack?.split('\n')[1]);
 }
 
 app.use(cors({ origin: '*' }));
