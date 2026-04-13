@@ -565,6 +565,8 @@ async function pollOKXFills() {
 }
 
 // Save fill to Firestore (only if not already saved)
+const MAUEX_USER_ID = 'aKVU0nMV2SViQ7Y6GVkL8RfNNz42';
+
 async function saveFillToFirestore(trade) {
   if (!db) return;
   try {
@@ -573,15 +575,7 @@ async function saveFillToFirestore(trade) {
     const snap = await col.where('exchangeId', '==', trade.exchangeId).limit(1).get();
     if (!snap.empty) return; // Already saved
 
-    // Find user — get from sync doc
-    const syncDoc = await db.collection('sync').doc('latest').get();
-    const userId  = syncDoc.exists ? syncDoc.data()?.userId : null;
-    if (!userId) {
-      console.warn('No userId found for fill save');
-      return;
-    }
-
-    await col.add({ ...trade, userId });
+    await col.add({ ...trade, userId: MAUEX_USER_ID });
     console.log(`✅ Saved fill: ${trade.exchange} ${trade.ticker} PnL=${trade.pnl}`);
   } catch(e) {
     console.error('Firestore save error:', e.message);
