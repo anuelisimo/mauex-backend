@@ -356,7 +356,8 @@ async function saveTradeToFirestore(trade) {
 async function syncBinanceHistory() {
   const key = (process.env.BINANCE_KEY    || '').trim();
   const sec = (process.env.BINANCE_SECRET || '').trim();
-  if (!key || !sec || !db) return;
+  if (!key || !sec || !db) { console.log('Binance history: skipped (no keys or db)'); return; }
+  console.log('Binance history: starting sync...');
 
   try {
     const endTs = Date.now();
@@ -405,7 +406,7 @@ async function syncBinanceHistory() {
       });
       if (ok) saved++;
     }
-    if (saved > 0) console.log(`Binance history: ${saved} new trades saved`);
+    console.log(`Binance history: ${saved} new trades saved`);
   } catch(e) {
     console.error('Binance history sync error:', e.message);
   }
@@ -415,7 +416,8 @@ async function syncBinanceHistory() {
 async function syncBybitHistory() {
   const key = (process.env.BYBIT_KEY    || '').trim();
   const sec = (process.env.BYBIT_SECRET || '').trim();
-  if (!key || !sec || !db) return;
+  if (!key || !sec || !db) { console.log('Bybit history: skipped (no keys or db)'); return; }
+  console.log('Bybit history: starting sync...');
 
   try {
     const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
@@ -460,7 +462,7 @@ async function syncBybitHistory() {
       }
       chunkStart = chunkEnd + 1;
     }
-    if (saved > 0) console.log(`Bybit history: ${saved} new trades saved`);
+    console.log(`Bybit history: ${saved} new trades saved`);
   } catch(e) {
     console.error('Bybit history sync error:', e.message);
   }
@@ -471,7 +473,8 @@ async function syncOKXHistory() {
   const key  = (process.env.OKX_KEY        || '').trim();
   const sec  = (process.env.OKX_SECRET     || '').trim();
   const pass = (process.env.OKX_PASSPHRASE || '').trim();
-  if (!key || !sec || !pass || !db) return;
+  if (!key || !sec || !pass || !db) { console.log('OKX history: skipped (no keys or db)'); return; }
+  console.log('OKX history: starting sync...');
 
   try {
     const okxSig = (path) => {
@@ -531,7 +534,7 @@ async function syncOKXHistory() {
       after = list[list.length-1].billId || '';
       hasMore = !!after;
     }
-    if (saved > 0) console.log(`OKX history: ${saved} new trades saved`);
+    console.log(`OKX history: ${saved} new trades saved`);
   } catch(e) {
     console.error('OKX history sync error:', e.message);
   }
