@@ -360,55 +360,63 @@ async function syncBinanceHistory() {
   console.log('Binance history: starting sync...');
 
   try {
+    const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+    let chunkStart = HISTORY_START;
     const endTs = Date.now();
-    const ts  = Date.now();
-    const q   = `startTime=${HISTORY_START}&endTime=${endTs}&limit=1000&timestamp=${ts}`;
-    const sig = hmac256(sec, q);
-    const r   = await safeFetch(
-      `https://fapi.binance.com/fapi/v1/userTrades?${q}&signature=${sig}`,
-      { headers: { 'X-MBX-APIKEY': key } }
-    );
-    if (!r.ok || !Array.isArray(r.data)) {
-      console.error('Binance userTrades error:', r.status, JSON.stringify(r.data)?.slice(0,300));
-      return;
-    }
-    console.log(`Binance userTrades: ${r.data.length} fills found`);
-
-    // Group by orderId
-    const byOrder = {};
-    r.data.forEach(f => {
-      if (!byOrder[f.orderId]) byOrder[f.orderId] = {
-        fills: [], symbol: f.symbol, side: f.side,
-        realizedPnl: 0, commission: 0, qty: 0, time: f.time,
-      };
-      byOrder[f.orderId].fills.push(f);
-      byOrder[f.orderId].realizedPnl += parseFloat(f.realizedPnl || 0);
-      byOrder[f.orderId].commission  += parseFloat(f.commission  || 0);
-      byOrder[f.orderId].qty         += parseFloat(f.qty         || 0);
-    });
-
     let saved = 0;
-    for (const o of Object.values(byOrder).filter(o => o.realizedPnl !== 0)) {
-      const pnl   = Math.round(o.realizedPnl * 100) / 100;
-      const fees  = Math.round(o.commission  * 100) / 100;
-      const price = parseFloat(o.fills[o.fills.length-1]?.price) || 0;
-      const qty   = o.qty;
-      const ok = await saveTradeToFirestore({
-        exchangeSource: 'BINANCE',
-        exchangeId:     `bnb-${o.fills[0].orderId}`,
-        ticker:         o.symbol.replace('USDT','').replace('BUSD',''),
-        dir:            o.side === 'BUY' ? 'long' : 'short',
-        exchange:       'BINANCE', type: 'futures',
-        closePrice:     price,
-        pnl:            Math.round((pnl - fees) * 100) / 100,
-        pnlRaw:         pnl, fees,
-        posSize:        Math.round(qty * price * 100) / 100,
-        status:         'closed',
-        closeDate:      new Date(o.time).toISOString().split('T')[0],
-        createdAt:      new Date(o.time).toISOString(),
-        closeNotes:     'Auto-sync Binance',
+
+    while (chunkStart < endTs) {
+      const chunkEnd = Math.min(chunkStart + SEVEN_DAYS, endTs);
+      const ts  = Date.now();
+      const q   = `startTime=${chunkStart}&endTime=${chunkEnd}&limit=1000&timestamp=${ts}`;
+      const sig = hmac256(sec, q);
+      const r   = await safeFetch(
+        `https://fapi.binance.com/fapi/v1/userTrades?${q}&signature=${sig}`,
+        { headers: { 'X-MBX-APIKEY': key } }
+      );
+
+      if (!r.ok || !Array.isArray(r.data)) {
+        console.error('Binance userTrades error:', r.status, JSON.stringify(r.data)?.slice(0,200));
+        break;
+      }
+
+      // Group by orderId
+      const byOrder = {};
+      r.data.forEach(f => {
+        if (!byOrder[f.orderId]) byOrder[f.orderId] = {
+          fills: [], symbol: f.symbol, side: f.side,
+          realizedPnl: 0, commission: 0, qty: 0, time: f.time,
+        };
+        byOrder[f.orderId].fills.push(f);
+        byOrder[f.orderId].realizedPnl += parseFloat(f.realizedPnl || 0);
+        byOrder[f.orderId].commission  += parseFloat(f.commission  || 0);
+        byOrder[f.orderId].qty         += parseFloat(f.qty         || 0);
       });
-      if (ok) saved++;
+
+      for (const o of Object.values(byOrder).filter(o => o.realizedPnl !== 0)) {
+        const pnl   = Math.round(o.realizedPnl * 100) / 100;
+        const fees  = Math.round(o.commission  * 100) / 100;
+        const price = parseFloat(o.fills[o.fills.length-1]?.price) || 0;
+        const qty   = o.qty;
+        const ok = await saveTradeToFirestore({
+          exchangeSource: 'BINANCE',
+          exchangeId:     `bnb-${o.fills[0].orderId}`,
+          ticker:         o.symbol.replace('USDT','').replace('BUSD',''),
+          dir:            o.side === 'BUY' ? 'long' : 'short',
+          exchange:       'BINANCE', type: 'futures',
+          closePrice:     price,
+          pnl:            Math.round((pnl - fees) * 100) / 100,
+          pnlRaw:         pnl, fees,
+          posSize:        Math.round(qty * price * 100) / 100,
+          status:         'closed',
+          closeDate:      new Date(o.time).toISOString().split('T')[0],
+          createdAt:      new Date(o.time).toISOString(),
+          closeNotes:     'Auto-sync Binance',
+        });
+        if (ok) saved++;
+      }
+
+      chunkStart = chunkEnd + 1;
     }
     console.log(`Binance history: ${saved} new trades saved`);
   } catch(e) {
