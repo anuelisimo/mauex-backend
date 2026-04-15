@@ -368,7 +368,11 @@ async function syncBinanceHistory() {
       `https://fapi.binance.com/fapi/v1/userTrades?${q}&signature=${sig}`,
       { headers: { 'X-MBX-APIKEY': key } }
     );
-    if (!r.ok || !Array.isArray(r.data)) return;
+    if (!r.ok || !Array.isArray(r.data)) {
+      console.error('Binance userTrades error:', r.status, JSON.stringify(r.data)?.slice(0,300));
+      return;
+    }
+    console.log(`Binance userTrades: ${r.data.length} fills found`);
 
     // Group by orderId
     const byOrder = {};
