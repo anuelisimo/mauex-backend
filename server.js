@@ -502,7 +502,7 @@ async function syncOKXHistory() {
     let hasMore = true;
 
     while (hasMore) {
-      const path = `/api/v5/account/positions-history?instType=SWAP&mgnMode=isolated&limit=100${after ? '&after='+after : ''}`;
+      const path = `/api/v5/account/positions-history?instType=SWAP&limit=100${after ? '&after='+after : ''}`;
       const { ts, sig } = okxSig(path);
       const r = await safeFetch(`https://www.okx.com${path}`, {
         headers: {
@@ -513,7 +513,7 @@ async function syncOKXHistory() {
       });
 
       if (!r.ok || r.data?.code !== '0') {
-        console.error('OKX positions-history error:', r.status, JSON.stringify(r.data)?.slice(0,200));
+        console.error('OKX positions-history error:', r.status, JSON.stringify(r.data)?.slice(0,300));
         break;
       }
       const list = r.data.data || [];
@@ -529,7 +529,7 @@ async function syncOKXHistory() {
           exchangeSource: 'OKX',
           exchangeId:     `okx-${p.posId}-${p.uTime}`,
           ticker:         p.instId.replace('-USDT-SWAP','').replace('-',''),
-          dir:            parseFloat(p.pos) > 0 ? 'long' : 'short',
+          dir:            (p.direction === 'long' || parseFloat(p.pos) > 0) ? 'long' : 'short',
           exchange:       'OKX', type: 'futures',
           entry:          parseFloat(p.openAvgPx) || 0,
           closePrice:     parseFloat(p.closeAvgPx) || 0,
