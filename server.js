@@ -496,13 +496,13 @@ async function syncOKXHistory() {
       return { ts, sig };
     };
 
-    // Use fills-history with pagination via after param
+    // Use positions-history endpoint — returns closed positions with PnL
     let after = '';
     let saved = 0;
     let hasMore = true;
 
     while (hasMore) {
-      const path = `/api/v5/trade/fills-history?instType=SWAP&limit=100${after ? '&after='+after : ''}`;
+      const path = `/api/v5/account/positions-history?instType=SWAP&mgnMode=isolated&limit=100${after ? '&after='+after : ''}`;
       const { ts, sig } = okxSig(path);
       const r = await safeFetch(`https://www.okx.com${path}`, {
         headers: {
@@ -512,38 +512,43 @@ async function syncOKXHistory() {
         }
       });
 
-      if (!r.ok || r.data?.code !== '0') break;
+      if (!r.ok || r.data?.code !== '0') {
+        console.error('OKX positions-history error:', r.status, JSON.stringify(r.data)?.slice(0,200));
+        break;
+      }
       const list = r.data.data || [];
       if (list.length === 0) break;
 
       // Filter by date
-      const filtered = list.filter(f => parseInt(f.ts) >= HISTORY_START && parseFloat(f.pnl || 0) !== 0);
+      const filtered = list.filter(p => parseInt(p.uTime) >= HISTORY_START);
 
-      for (const f of filtered) {
-        const pnl  = parseFloat(f.pnl  || 0);
-        const fees = Math.abs(parseFloat(f.fee || 0));
+      for (const p of filtered) {
+        const pnl  = parseFloat(p.realizedPnl || 0);
+        const fees = Math.abs(parseFloat(p.fee || 0));
         const ok = await saveTradeToFirestore({
           exchangeSource: 'OKX',
-          exchangeId:     `okx-${f.tradeId}`,
-          ticker:         f.instId.replace('-USDT-SWAP','').replace('-',''),
-          dir:            f.side === 'buy' ? 'long' : 'short',
+          exchangeId:     `okx-${p.posId}-${p.uTime}`,
+          ticker:         p.instId.replace('-USDT-SWAP','').replace('-',''),
+          dir:            parseFloat(p.pos) > 0 ? 'long' : 'short',
           exchange:       'OKX', type: 'futures',
-          closePrice:     parseFloat(f.fillPx || 0),
+          entry:          parseFloat(p.openAvgPx) || 0,
+          closePrice:     parseFloat(p.closeAvgPx) || 0,
           pnl:            Math.round((pnl - fees) * 100) / 100,
           pnlRaw:         Math.round(pnl * 100) / 100, fees,
-          posSize:        parseFloat(f.fillNotionalUsd || 0),
+          posSize:        parseFloat(p.notionalUsd) || 0,
+          leverage:       parseInt(p.lever) || 1,
           status:         'closed',
-          closeDate:      new Date(parseInt(f.ts)).toISOString().split('T')[0],
-          createdAt:      new Date(parseInt(f.ts)).toISOString(),
+          createdAt:      new Date(parseInt(p.cTime)).toISOString(),
+          closeDate:      new Date(parseInt(p.uTime)).toISOString().split('T')[0],
           closeNotes:     'Auto-sync OKX',
         });
         if (ok) saved++;
       }
 
-      // Stop if oldest item is before start date
-      const oldest = parseInt(list[list.length-1]?.ts || 0);
+      // Paginate using oldest uTime as cursor
+      const oldest = parseInt(list[list.length-1]?.uTime || 0);
       if (oldest < HISTORY_START || list.length < 100) break;
-      after = list[list.length-1].billId || '';
+      after = list[list.length-1].uTime || '';
       hasMore = !!after;
     }
     console.log(`OKX history: ${saved} new trades saved`);
