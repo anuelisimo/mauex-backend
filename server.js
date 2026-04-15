@@ -565,6 +565,24 @@ app.post('/set-user', async (req, res) => {
   res.json({ ok: true });
 });
 
+app.get('/sync-history-now', async (req, res) => {
+  const results = { binance: null, bybit: null, okx: null };
+  const key = (process.env.BINANCE_KEY || '').trim();
+  const sec = (process.env.BINANCE_SECRET || '').trim();
+  results.binance = { hasKey: !!key, hasSec: !!sec, hasDb: !!db };
+  const bKey = (process.env.BYBIT_KEY || '').trim();
+  results.bybit = { hasKey: !!bKey };
+  const oKey = (process.env.OKX_KEY || '').trim();
+  results.okx = { hasKey: !!oKey };
+  try {
+    await syncAllHistory();
+    results.ran = true;
+  } catch(e) {
+    results.error = e.message;
+  }
+  res.json(results);
+});
+
 app.post('/clear-history', async (req, res) => {
   if (!db) return res.json({ error: 'No DB' });
   try {
