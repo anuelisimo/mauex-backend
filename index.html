@@ -1035,7 +1035,7 @@ textarea{resize:vertical;min-height:70px;}
       </div>
       <div style="margin-bottom:12px;"><label class="lbl">Notas</label><textarea id="dtNotes" placeholder="Contexto del trade..."></textarea></div>
     </div>
-    <div class="modal-footer"><button class="btn" onclick="closeModal('directTradeModal')">Cancelar</button><button class="btn acc" onclick="saveDirectTrade()">Guardar en historial</button></div>
+    <div class="modal-footer"><button class="btn" onclick="closeModal('directTradeModal')">Cancelar</button><button class="btn acc" id="dtSaveBtn" onclick="window._saveDirectTrade()">Guardar en historial</button></div>
   </div>
 </div>
 
@@ -1429,7 +1429,8 @@ window.saveDirectPosition = async () => {
 window.openDirectTradeModal = () => {
   // Reset to "add" mode
   document.querySelector('#directTradeModal .modal-title').textContent = 'Agregar trade al historial';
-  document.querySelector('#directTradeModal .modal-footer .btn.acc').onclick = () => saveDirectTrade();
+  document.getElementById('dtSaveBtn').textContent = 'Guardar en historial';
+  window._directTradeEditId = null;
   const G = window.G;
   const sel = document.getElementById('dtTrader');
   if (sel && G) {
@@ -1439,6 +1440,9 @@ window.openDirectTradeModal = () => {
   document.getElementById('dtCloseDate').value = new Date().toISOString().split('T')[0];
   openModal('directTradeModal');
 };
+
+window._directTradeEditId = null;
+window._saveDirectTrade = () => window.saveDirectTrade(window._directTradeEditId);
 
 window.saveDirectTrade = async (editId) => {
   const ticker = document.getElementById('dtTicker').value.trim().toUpperCase();
@@ -1489,7 +1493,8 @@ window.saveDirectTrade = async (editId) => {
     closeModal('directTradeModal');
     // Reset title and button
     document.querySelector('#directTradeModal .modal-title').textContent = 'Agregar trade al historial';
-    document.querySelector('#directTradeModal .modal-footer .btn.acc').onclick = () => saveDirectTrade();
+    document.getElementById('dtSaveBtn').textContent = 'Guardar en historial';
+    window._directTradeEditId = null;
     renderHistory();
     toast(editId ? 'Trade actualizado.' : 'Trade agregado al historial.');
     if (!editId) {
@@ -2774,8 +2779,9 @@ function renderHistory() {
     <td style="color:var(--t3);font-size:10px;">${fmtD(t.closeDate||t.updatedAt)}</td>
     <td><span class="badge ${(t.pnl||0)>=0?'bl':'bs'}">${(t.pnl||0)>=0?'WIN':'LOSS'}</span></td>
     <td style="color:var(--t2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;">${allNotes||'—'}</td>
-    <td onclick="event.stopPropagation()">
+    <td onclick="event.stopPropagation()" style="white-space:nowrap;">
       <button class="btn sm" onclick="openEditTrade('${t.id}')">✎</button>
+      <button class="btn dan sm" onclick="deleteTrade('${t.id}')">✕</button>
     </td>
   </tr>
   ${allNotes?`<tr id="note-${t.id}" style="display:none;"><td colspan="13" style="background:var(--bg3);padding:10px 12px;font-size:11px;color:var(--t2);border-left:2px solid var(--border2);">${allNotes}</td></tr>`:''}`;
@@ -2860,7 +2866,8 @@ window.openEditTrade = id => {
     document.getElementById('dtNotes').value     = [t.notes, t.closeNotes].filter(Boolean).join(' · ')||'';
     // Change title and button to "edit" mode
     document.querySelector('#directTradeModal .modal-title').textContent = '✎ Editar trade';
-    document.querySelector('#directTradeModal .modal-footer .btn.acc').onclick = () => saveDirectTrade(id);
+    document.getElementById('dtSaveBtn').textContent = 'Guardar cambios';
+    window._directTradeEditId = id;
     openModal('directTradeModal');
     return;
   }
