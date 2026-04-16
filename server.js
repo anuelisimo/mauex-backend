@@ -566,10 +566,8 @@ async function syncAllHistory() {
   ]);
 }
 
-setInterval(syncAllHistory, 5 * 60 * 1000);
-
-// Initial sync after 15 seconds (gives Firebase time to connect)
-setTimeout(syncAllHistory, 15000);
+// History sync disabled — trades are entered manually via MAUex
+// Call /sync-history-now manually if needed
 
 // Receive userId from frontend to associate fills
 app.post('/set-user', async (req, res) => {
