@@ -633,6 +633,59 @@ app.get('/myip', async (req, res) => {
   } catch(e) { res.json({ error: e.message }); }
 });
 
+app.get('/binance-balance', async (req, res) => {
+  const key = (process.env.BINANCE_KEY    || '').trim();
+  const sec = (process.env.BINANCE_SECRET || '').trim();
+  if (!key || !sec) return res.json({ balances: {}, error: 'No keys' });
+
+  const result = { USDT: 0, USDC: 0 };
+  const errors = [];
+
+  try {
+    // ── Futures account balance (/fapi/v2/balance) ──────────────────────────
+    const ts1 = Date.now();
+    const q1  = `timestamp=${ts1}`;
+    const r1  = await safeFetch(
+      `https://fapi.binance.com/fapi/v2/balance?${q1}&signature=${hmac256(sec,q1)}`,
+      { headers: { 'X-MBX-APIKEY': key } }
+    );
+    if (r1.ok && Array.isArray(r1.data)) {
+      for (const b of r1.data) {
+        if (b.asset === 'USDT') result.USDT += parseFloat(b.availableBalance || 0);
+        if (b.asset === 'USDC') result.USDC += parseFloat(b.availableBalance || 0);
+      }
+    } else {
+      errors.push(`futures: ${r1.status} ${r1.raw || ''}`);
+    }
+
+    // ── Spot account balance (/api/v3/account) ──────────────────────────────
+    const ts2 = Date.now();
+    const q2  = `timestamp=${ts2}&omitZeroBalances=true`;
+    const r2  = await safeFetch(
+      `https://api.binance.com/api/v3/account?${q2}&signature=${hmac256(sec,q2)}`,
+      { headers: { 'X-MBX-APIKEY': key } }
+    );
+    if (r2.ok && r2.data?.balances) {
+      for (const b of r2.data.balances) {
+        if (b.asset === 'USDT') result.USDT += parseFloat(b.free || 0);
+        if (b.asset === 'USDC') result.USDC += parseFloat(b.free || 0);
+      }
+    } else {
+      errors.push(`spot: ${r2.status} ${r2.raw || ''}`);
+    }
+
+    res.json({
+      balances: {
+        USDT: Math.round(result.USDT * 100) / 100,
+        USDC: Math.round(result.USDC * 100) / 100,
+      },
+      errors: errors.length ? errors : undefined,
+    });
+  } catch(e) {
+    res.json({ balances: {}, error: e.message });
+  }
+});
+
 app.get('/binance-positions', (req, res) => res.json({
   positions: state.positions,
   lastSync:  state.lastSync,
