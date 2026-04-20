@@ -638,11 +638,11 @@ app.get('/binance-balance', async (req, res) => {
   const sec = (process.env.BINANCE_SECRET || '').trim();
   if (!key || !sec) return res.json({ balances: {}, error: 'No keys' });
 
-  const result = { USDT: 0, USDC: 0 };
+  let usdtTotal = 0, usdcTotal = 0;
   const errors = [];
 
   try {
-    // ── Futures account balance (/fapi/v2/balance) ──────────────────────────
+    // ── Futures: /fapi/v2/balance — walletBalance = total incl. margin ──────
     const ts1 = Date.now();
     const q1  = `timestamp=${ts1}`;
     const r1  = await safeFetch(
@@ -651,14 +651,14 @@ app.get('/binance-balance', async (req, res) => {
     );
     if (r1.ok && Array.isArray(r1.data)) {
       for (const b of r1.data) {
-        if (b.asset === 'USDT') result.USDT += parseFloat(b.availableBalance || 0);
-        if (b.asset === 'USDC') result.USDC += parseFloat(b.availableBalance || 0);
+        if (b.asset === 'USDT') usdtTotal += parseFloat(b.walletBalance || 0);
+        if (b.asset === 'USDC') usdcTotal += parseFloat(b.walletBalance || 0);
       }
     } else {
-      errors.push(`futures: ${r1.status} ${r1.raw || ''}`);
+      errors.push(`futures: ${r1.status} ${r1.raw||''}`);
     }
 
-    // ── Spot account balance (/api/v3/account) ──────────────────────────────
+    // ── Spot: /api/v3/account — free + locked ────────────────────────────────
     const ts2 = Date.now();
     const q2  = `timestamp=${ts2}&omitZeroBalances=true`;
     const r2  = await safeFetch(
@@ -667,17 +667,18 @@ app.get('/binance-balance', async (req, res) => {
     );
     if (r2.ok && r2.data?.balances) {
       for (const b of r2.data.balances) {
-        if (b.asset === 'USDT') result.USDT += parseFloat(b.free || 0);
-        if (b.asset === 'USDC') result.USDC += parseFloat(b.free || 0);
+        // free + locked = total in spot
+        if (b.asset === 'USDT') usdtTotal += parseFloat(b.free||0) + parseFloat(b.locked||0);
+        if (b.asset === 'USDC') usdcTotal += parseFloat(b.free||0) + parseFloat(b.locked||0);
       }
     } else {
-      errors.push(`spot: ${r2.status} ${r2.raw || ''}`);
+      errors.push(`spot: ${r2.status} ${r2.raw||''}`);
     }
 
     res.json({
       balances: {
-        USDT: Math.round(result.USDT * 100) / 100,
-        USDC: Math.round(result.USDC * 100) / 100,
+        USDT: Math.round(usdtTotal * 100) / 100,
+        USDC: Math.round(usdcTotal * 100) / 100,
       },
       errors: errors.length ? errors : undefined,
     });

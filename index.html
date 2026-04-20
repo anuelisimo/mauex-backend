@@ -362,6 +362,8 @@ textarea{resize:vertical;min-height:70px;}
         <button class="btn acc sm" onclick="window.showPage('calc')">+ Nuevo trade</button>
       </div>
       <div class="g4" style="margin-bottom:20px;" id="dashMetrics"></div>
+      <!-- Liquidity widget -->
+      <div id="dashLiquidity" style="margin-bottom:20px;display:none;"></div>
       <div class="g2" style="margin-bottom:20px;">
         <div class="card"><div class="sec-label">PnL mensual</div><div style="position:relative;height:180px;"><canvas id="chartPnl"></canvas></div></div>
         <div class="card"><div class="sec-label">Win rate por trader</div><div style="position:relative;height:180px;"><canvas id="chartWR"></canvas></div></div>
@@ -496,6 +498,9 @@ textarea{resize:vertical;min-height:70px;}
           <button class="btn acc sm" onclick="window.openDirectTradeModal()">+ Agregar trade</button>
         </div>
       </div>
+      <!-- Charts de rendimiento -->
+      <div id="histCharts" style="margin-bottom:20px;"></div>
+
       <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
         <input type="text" id="filtTicker" placeholder="Ticker..." style="width:120px;" oninput="renderHistory()">
         <select id="filtDir" style="width:100px;" onchange="renderHistory()"><option value="">Dirección</option><option>long</option><option>short</option><option>spot</option></select>
@@ -717,7 +722,7 @@ textarea{resize:vertical;min-height:70px;}
         <div class="sec-label">Estado de sincronización</div>
         <div id="syncStatus" style="font-family:var(--mono);font-size:12px;line-height:1.8;color:var(--t2);"></div>
         <div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap;">
-          <button class="btn acc sm" onclick="if(!_masterPass){toast('Ingresá tu contraseña maestra primero','error');}else{syncAllExchanges();}">↻ Sincronizar posiciones</button>
+
           <button class="btn sm" onclick="window.showPage('positions')">Ver posiciones</button>
         </div>
         <div style="font-size:10px;color:var(--t3);margin-top:8px;font-family:var(--mono);">
@@ -906,12 +911,12 @@ textarea{resize:vertical;min-height:70px;}
         <div><label class="lbl">Apalancamiento</label><input type="number" id="eLev" min="1" max="125"></div>
       </div>
       <div class="g2" style="gap:10px;margin-bottom:12px;">
-        <div><label class="lbl">Entry</label><input type="number" id="eEntry"></div>
-        <div><label class="lbl">Stop Loss</label><input type="number" id="eSL"></div>
+        <div><label class="lbl">Entry</label><input type="number" id="eEntry" oninput="syncEditFields('entry')"></div>
+        <div><label class="lbl">Stop Loss</label><input type="number" id="eSL" oninput="syncEditFields('sl')"></div>
       </div>
       <div class="g2" style="gap:10px;margin-bottom:12px;">
-        <div><label class="lbl">Tamaño USD</label><input type="number" id="eSize" placeholder="Opcional si hay Riesgo+SL"></div>
-        <div><label class="lbl">Riesgo USD</label><input type="number" id="eRisk" placeholder="Opcional"></div>
+        <div><label class="lbl">Tamaño USD</label><input type="number" id="eSize" placeholder="Opcional si hay Riesgo+SL" oninput="syncEditFields('size')"></div>
+        <div><label class="lbl">Riesgo USD</label><input type="number" id="eRisk" placeholder="Opcional" oninput="syncEditFields('risk')"></div>
       </div>
       <div class="g2" style="gap:10px;margin-bottom:12px;">
         <div><label class="lbl">Trader</label><select id="eTrader"></select></div>
@@ -1465,8 +1470,8 @@ window.saveDirectTrade = async (editId) => {
   // Calculate PnL if not provided manually
   let pnl = manualPnl ? parseFloat(manualPnl) : null;
   if (pnl == null && entry && exit && size) {
-    const sign = (dir==='short') ? 1 : -1;
-    pnl = Math.round((size/entry)*(entry-exit)*sign*100)/100;
+    const sign = (dir==='short') ? -1 : 1;
+    pnl = Math.round((size/entry)*(exit-entry)*sign*100)/100;
   }
   const margin = dir==='spot' ? size : size/lev;
   const pnlPct = pnl!=null && margin ? Math.round(pnl/margin*10000)/100 : 0;
@@ -1515,6 +1520,15 @@ window.openPartialClose = id => {
   openModal('partialCloseModal');
 };
 
+window.closeAtTP = (id, tpKey, tpPrice) => {
+  // Pre-fill close modal with TP price
+  window._closeId = id;
+  document.getElementById('closeDate').value  = new Date().toISOString().split('T')[0];
+  document.getElementById('closePrice').value = tpPrice;
+  document.getElementById('closeNotes').value = tpKey.toUpperCase() + ' alcanzado';
+  openModal('closeTradeModal');
+};
+
 window.confirmPartialClose = async () => {
   const id         = window._closeId;
   const closePrice = parseFloat(document.getElementById('partialPrice').value) || 0;
@@ -1530,8 +1544,8 @@ window.confirmPartialClose = async () => {
   const fraction   = closePct / 100;
   const closedSize = Math.round(t.posSize * fraction * 100) / 100;
   const remainSize = Math.round(t.posSize * (1 - fraction) * 100) / 100;
-  const sign       = (t.dir==='short'||t.dir==='spot') ? 1 : -1;
-  const pnl        = Math.round((closedSize/t.entry) * (t.entry-closePrice) * sign * 100) / 100;
+  const sign       = (t.dir==='short') ? -1 : 1;
+  const pnl        = Math.round((closedSize/t.entry) * (closePrice-t.entry) * sign * 100) / 100;
   const margin     = t.dir==='spot' ? closedSize : closedSize/(t.leverage||1);
   const days       = Math.round((new Date(closeDate) - new Date(t.createdAt)) / 86400000);
 
@@ -1581,8 +1595,8 @@ window.confirmClose = async () => {
   if (!closePrice) { toast('Ingresá el precio de salida.','error'); return; }
   const t = trades.find(x => x.id === id);
   if (!t) return;
-  const sign   = (t.dir==='short'||t.dir==='spot') ? 1 : -1;
-  const pnl    = Math.round((t.posSize/t.entry) * (t.entry-closePrice) * sign * 100) / 100;
+  const sign   = (t.dir==='short') ? -1 : 1;
+  const pnl    = Math.round((t.posSize/t.entry) * (closePrice-t.entry) * sign * 100) / 100;
   const margin = t.dir==='spot' ? (t.posSize||0) : (t.posSize||0)/(t.leverage||1);
   const days   = Math.round((new Date(closeDate) - new Date(t.createdAt)) / 86400000);
   try {
@@ -1765,6 +1779,153 @@ function setPrice(sym, type, price) {
   prices[sym][type] = price;
   updatePriceEl(sym);
   updateTimestamp();
+  checkPriceAlerts(sym, price);
+}
+
+// ── Price Alert System ────────────────────────────────────────────────────
+const _alertState = {}; // { key: { count, silencedUntil, firedOnce } }
+
+function _alertKey(id, type) { return `${id}_${type}`; }
+
+function _shouldAlert(key, critical) {
+  const now = Date.now();
+  const s = _alertState[key] || { count:0, silencedUntil:0, firedOnce:false };
+  if (s.silencedUntil && now < s.silencedUntil) return false;
+  if (!critical && s.firedOnce) return false;
+  return true;
+}
+
+function _recordAlert(key, critical) {
+  const s = _alertState[key] || { count:0, silencedUntil:0, firedOnce:false };
+  s.count++;
+  s.firedOnce = true;
+  if (critical && s.count >= 3) {
+    s.silencedUntil = Date.now() + 5 * 60 * 1000; // silence 5min
+    s.count = 0;
+  }
+  _alertState[key] = s;
+}
+
+function _resetAlert(key) {
+  delete _alertState[key];
+}
+
+function _notify(title, body, critical) {
+  // Browser notification
+  if (Notification.permission === 'granted') {
+    new Notification(title, { body, icon: '/favicon.ico', silent: !critical });
+  }
+  // Toast
+  toast(`${title}: ${body}`, critical ? 'error' : 'warning');
+}
+
+function checkPriceAlerts(sym, price) {
+  if (!window.G || !window._loadTrades) return;
+  const activeTrades = (window.G.trades()||[]);
+
+  activeTrades.forEach(t => {
+    if (!t.ticker) return;
+    const tSym = t.ticker.replace(/USDT|BUSD|USD$/,'').toUpperCase();
+    if (tSym !== sym) return;
+    const entry = t.entry || 0;
+    const sl    = t.sl || 0;
+    const tp1   = t.tp1 || 0;
+    const tp2   = t.tp2 || 0;
+    const tp3   = t.tp3 || 0;
+    const dir   = t.dir || 'long';
+    const isLong = dir === 'long' || dir === 'spot';
+
+    // ── WATCHLIST: precio se acerca al entry (dentro del 2%) — CRÍTICA ──
+    if (t.status === 'watchlist' && entry) {
+      const dist = Math.abs(price - entry) / entry;
+      const key = _alertKey(t.id, 'near_entry');
+      if (dist <= 0.02) {
+        if (_shouldAlert(key, true)) {
+          _recordAlert(key, true);
+          _notify(`👁 ${t.ticker} Watchlist`, `Precio $${price.toFixed(4)} cerca del entry $${entry} (${(dist*100).toFixed(1)}%)`, true);
+        }
+      } else {
+        _resetAlert(key);
+      }
+    }
+
+    // ── ÓRDENES: precio tocó el entry — UNA VEZ ──
+    if (t.status === 'pending' && entry) {
+      const key = _alertKey(t.id, 'entry_hit');
+      const hit = isLong ? price <= entry * 1.005 && price >= entry * 0.995
+                         : price >= entry * 0.995 && price <= entry * 1.005;
+      if (hit && _shouldAlert(key, false)) {
+        _recordAlert(key, false);
+        _notify(`⚡ ${t.ticker} Orden ejecutada`, `Precio $${price.toFixed(4)} tocó el entry $${entry}`, false);
+      }
+    }
+
+    // ── POSICIONES ──
+    if (t.status === 'active' && entry) {
+
+      // Precio en pérdida (bajo entry en long, sobre entry en short) — CRÍTICA
+      const inLoss = isLong ? price < entry : price > entry;
+      const lossKey = _alertKey(t.id, 'in_loss');
+      if (inLoss) {
+        if (_shouldAlert(lossKey, true)) {
+          _recordAlert(lossKey, true);
+          const pct = ((price - entry) / entry * 100).toFixed(2);
+          _notify(`⚠️ ${t.ticker} en pérdida`, `Precio $${price.toFixed(4)} | Entry $${entry} (${pct}%)`, true);
+        }
+      } else {
+        _resetAlert(lossKey);
+      }
+
+      // SL tocado — CRÍTICA
+      if (sl) {
+        const slHit = isLong ? price <= sl : price >= sl;
+        const slKey = _alertKey(t.id, 'sl_hit');
+        if (slHit) {
+          if (_shouldAlert(slKey, true)) {
+            _recordAlert(slKey, true);
+            _notify(`🛑 ${t.ticker} SL tocado`, `Precio $${price.toFixed(4)} tocó SL $${sl}`, true);
+          }
+        } else {
+          _resetAlert(slKey);
+        }
+      }
+
+      // TP1 tocado — UNA VEZ
+      if (tp1) {
+        const tp1Hit = isLong ? price >= tp1 : price <= tp1;
+        const tp1Key = _alertKey(t.id, 'tp1_hit');
+        if (tp1Hit && _shouldAlert(tp1Key, false)) {
+          _recordAlert(tp1Key, false);
+          _notify(`🎯 ${t.ticker} TP1 alcanzado`, `Precio $${price.toFixed(4)} tocó TP1 $${tp1}`, false);
+        }
+      }
+
+      // TP2 tocado — UNA VEZ
+      if (tp2) {
+        const tp2Hit = isLong ? price >= tp2 : price <= tp2;
+        const tp2Key = _alertKey(t.id, 'tp2_hit');
+        if (tp2Hit && _shouldAlert(tp2Key, false)) {
+          _recordAlert(tp2Key, false);
+          _notify(`🎯 ${t.ticker} TP2 alcanzado`, `Precio $${price.toFixed(4)} tocó TP2 $${tp2}`, false);
+        }
+      }
+
+      // TP3 tocado — UNA VEZ
+      if (tp3) {
+        const tp3Hit = isLong ? price >= tp3 : price <= tp3;
+        const tp3Key = _alertKey(t.id, 'tp3_hit');
+        if (tp3Hit && _shouldAlert(tp3Key, false)) {
+          _recordAlert(tp3Key, false);
+          _notify(`🎯 ${t.ticker} TP3 alcanzado`, `Precio $${price.toFixed(4)} tocó TP3 $${tp3}`, false);
+        }
+      }
+    }
+  });
+}
+
+// Request notification permission on load
+if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+  Notification.requestPermission();
 }
 
 function getPrice(ticker, dir) {
@@ -2185,6 +2346,33 @@ window.setCustomLev = v => {
 };
 
 // ── Calc compute ───────────────────────────────────────────────────────────
+window.syncEditFields = (changed) => {
+  const entry = parseFloat(document.getElementById('eEntry').value)||0;
+  const sl    = parseFloat(document.getElementById('eSL').value)||0;
+  const size  = parseFloat(document.getElementById('eSize').value)||0;
+  const risk  = parseFloat(document.getElementById('eRisk').value)||0;
+  if (!entry || !sl) return;
+  const slDist = Math.abs(sl-entry)/entry;
+  if (slDist <= 0) return;
+
+  if (changed === 'size' && size) {
+    // Size changed → recalculate Risk
+    document.getElementById('eRisk').value = Math.round(size * slDist * 100)/100;
+  } else if (changed === 'risk' && risk) {
+    // Risk changed → recalculate Size
+    document.getElementById('eSize').value = Math.round(risk / slDist * 100)/100;
+  } else if (changed === 'entry' || changed === 'sl') {
+    // Entry or SL changed → recalculate whichever of Size/Risk is missing
+    if (risk) {
+      // Risk is the source of truth → update Size
+      document.getElementById('eSize').value = Math.round(risk / slDist * 100)/100;
+    } else if (size) {
+      // Size is the source of truth → update Risk
+      document.getElementById('eRisk').value = Math.round(size * slDist * 100)/100;
+    }
+  }
+};
+
 window.compute = () => {
   const entry = parseFloat(document.getElementById('cEntry').value)||0;
   const sl    = parseFloat(document.getElementById('cSL').value)||0;
@@ -2295,6 +2483,185 @@ window.compute = () => {
 
 // ── Dashboard ──────────────────────────────────────────────────────────────
 let chPnl, chWR, chA;
+let _liquidityCache = null; // cache so we don't re-fetch on every render
+
+async function fetchAndRenderLiquidity() {
+  const el = document.getElementById('dashLiquidity');
+  if (!el) return;
+
+  let data = _liquidityCache;
+
+  // If no cache yet, try fetching /balance directly from Worker
+  if (!data && PROXY_URL) {
+    try {
+      el.style.display = 'block';
+      el.innerHTML = `<div class="card" style="padding:16px 20px;color:var(--t3);font-family:var(--mono);font-size:11px;">⟳ Cargando capital...</div>`;
+      const r = await fetch(`${PROXY_URL}/balance`);
+      if (r.ok) {
+        const d = await r.json();
+        if (d.liquidity) {
+          _liquidityCache = { liquidity: d.liquidity, balances: d.balances };
+          data = _liquidityCache;
+        }
+      }
+    } catch(e) {}
+  }
+
+  if (!data || !data.liquidity || data.liquidity.total === 0) {
+    el.style.display = 'none';
+    return;
+  }
+
+  const { balances, liquidity } = data;
+
+  // ── Build per-exchange breakdown from positions ────────────────────────────
+  const positions = window.exchangePositions || [];
+  // Include active + zombie positions (all open)
+  const manualPos = (window.G?.trades()||[]).filter(t => t.status==='active' || t.status==='zombie');
+
+  // Per-exchange: margin (futures) and spot posSize
+  const byEx = {};
+  const initEx = (ex) => {
+    if (!byEx[ex]) byEx[ex] = { margin: 0, spot: 0, pnl: 0 };
+  };
+
+  // Exchange positions (from sync)
+  positions.forEach(p => {
+    const ex = (p.exchange||'').toUpperCase();
+    initEx(ex);
+    if (p.type === 'spot') {
+      byEx[ex].spot += p.posSize || 0;
+    } else {
+      byEx[ex].margin += p.margin || 0;
+      byEx[ex].pnl    += p.pnl   || 0;
+    }
+  });
+
+  // Manual positions (from Firestore)
+  manualPos.forEach(p => {
+    const ex = (p.exchange||'MANUAL').toUpperCase();
+    initEx(ex);
+    if (p.dir === 'spot') {
+      byEx[ex].spot += p.posSize || 0;
+    } else {
+      const lev    = p.leverage || 1;
+      const margin = p.dir==='spot' ? (p.posSize||0) : (p.posSize||0)/lev;
+      byEx[ex].margin += margin;
+      // Live PnL from price if available
+      const sym   = (p.ticker||'').replace(/USDT|BUSD|USD$/,'').toUpperCase();
+      const price = window.G?.getPrice(sym, p.dir);
+      if (price && p.entry && p.posSize) {
+        const sign = p.dir==='short' ? -1 : 1;
+        const contr = p.posSize / p.entry;
+        byEx[ex].pnl += Math.round(contr*(price-p.entry)*sign*100)/100;
+      }
+    }
+  });
+
+  // ── Totals ─────────────────────────────────────────────────────────────────
+  const totalFree   = liquidity.total;
+  const totalMargin = Object.values(byEx).reduce((s,e) => s + e.margin, 0);
+  const totalSpot   = Object.values(byEx).reduce((s,e) => s + e.spot,   0);
+  const totalPnl    = Object.values(byEx).reduce((s,e) => s + e.pnl,    0);
+  const patrimonio  = totalFree + totalMargin + totalSpot + totalPnl;
+
+  // ── Per-exchange table ─────────────────────────────────────────────────────
+  // Merge balances keys + byEx keys
+  const allExchanges = [...new Set([...Object.keys(balances||{}), ...Object.keys(byEx)])];
+
+  const exRows = allExchanges.map(ex => {
+    const b     = balances?.[ex] || {};
+    const pos   = byEx[ex]       || {};
+    const libre = (b.USDT||0) + (b.USDC||0);
+    const margin = pos.margin || 0;
+    const spot   = pos.spot   || 0;
+    const pnl    = pos.pnl    || 0;
+    const total  = libre + margin + spot + pnl;
+    if (total === 0) return '';
+
+    const pnlStr = pnl !== 0
+      ? `<span style="color:${pnl>=0?'var(--accent)':'var(--red)'};">${pnl>=0?'+':''}$${fmt(pnl)}</span>`
+      : '';
+
+    return `<div style="display:grid;grid-template-columns:80px 1fr 1fr 1fr 1fr 90px;gap:4px;align-items:center;padding:6px 0;border-bottom:0.5px solid var(--border);">
+      <span style="font-size:10px;font-weight:600;color:var(--t1);font-family:var(--mono);">${ex}</span>
+      <div>
+        <div style="font-size:8px;color:var(--t3);font-family:var(--mono);">LIBRE</div>
+        <div style="font-size:11px;font-family:var(--mono);color:#3d9cf0;">${libre>0?'$'+fmt(libre):'—'}</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:var(--t3);font-family:var(--mono);">EN MARGEN</div>
+        <div style="font-size:11px;font-family:var(--mono);color:#a78bfa;">${margin>0?'$'+fmt(margin):'—'}</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:var(--t3);font-family:var(--mono);">SPOT</div>
+        <div style="font-size:11px;font-family:var(--mono);color:var(--amber);">${spot>0?'$'+fmt(spot):'—'}</div>
+      </div>
+      <div>
+        <div style="font-size:8px;color:var(--t3);font-family:var(--mono);">PNL</div>
+        <div style="font-size:11px;font-family:var(--mono);">${pnlStr||'—'}</div>
+      </div>
+      <div style="text-align:right;">
+        <div style="font-size:8px;color:var(--t3);font-family:var(--mono);">TOTAL</div>
+        <div style="font-size:13px;font-weight:700;font-family:var(--mono);color:var(--t1);">$${fmt(total)}</div>
+      </div>
+    </div>`;
+  }).join('');
+
+  el.style.display = 'block';
+  el.innerHTML = `
+  <div class="card" style="padding:16px 20px;">
+    <div style="font-size:9px;color:var(--t3);font-family:var(--mono);text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px;">Capital en exchanges</div>
+
+    <!-- Summary row -->
+    <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr 1fr;gap:8px;margin-bottom:16px;padding-bottom:14px;border-bottom:0.5px solid var(--border2);">
+      <div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px;">Libre</div>
+        <div style="font-family:var(--mono);font-size:18px;font-weight:600;color:#3d9cf0;">$${fmt(totalFree)}</div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);margin-top:2px;">USDT + USDC</div>
+      </div>
+      <div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px;">En margen</div>
+        <div style="font-family:var(--mono);font-size:18px;font-weight:600;color:#a78bfa;">$${fmt(totalMargin)}</div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);margin-top:2px;">futuros/perps</div>
+      </div>
+      <div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px;">Spot</div>
+        <div style="font-family:var(--mono);font-size:18px;font-weight:600;color:var(--amber);">$${fmt(totalSpot)}</div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);margin-top:2px;">posiciones spot</div>
+      </div>
+      <div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px;">PnL abierto</div>
+        <div style="font-family:var(--mono);font-size:18px;font-weight:600;" class="${totalPnl>=0?'pnl-pos':'pnl-neg'}">${totalPnl>=0?'+':''}$${fmt(totalPnl)}</div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);margin-top:2px;">no realizado</div>
+      </div>
+      <div style="border-left:0.5px solid var(--border);padding-left:12px;">
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);text-transform:uppercase;margin-bottom:4px;">Patrimonio</div>
+        <div style="font-family:var(--mono);font-size:18px;font-weight:700;color:var(--accent);">$${fmt(patrimonio)}</div>
+        <div style="font-size:9px;color:var(--t3);font-family:var(--mono);margin-top:2px;">total</div>
+      </div>
+    </div>
+
+    <!-- Per-exchange header -->
+    <div style="display:grid;grid-template-columns:80px 1fr 1fr 1fr 1fr 90px;gap:4px;padding-bottom:4px;margin-bottom:2px;">
+      ${['Exchange','Libre','En margen','Spot','PnL','Total'].map(h=>
+        `<span style="font-size:8px;color:var(--t3);font-family:var(--mono);text-transform:uppercase;${h==='Total'?'text-align:right;':''}">${h}</span>`
+      ).join('')}
+    </div>
+    ${exRows}
+  </div>`;
+}
+
+// Called after each sync to update liquidity display
+window._updateLiquidityCache = (data) => {
+  if (data?.liquidity) _liquidityCache = {
+    liquidity:    data.liquidity,
+    balances:     data.balances,
+    marginInUse:  data.marginInUse || 0,
+    totalPnl:     data.totalPnl    || 0,
+  };
+  fetchAndRenderLiquidity();
+};
 
 function renderDashboard() {
   const G      = window.G; if(!G) return;
@@ -2322,6 +2689,7 @@ function renderDashboard() {
 
   // Charts
   drawPnlChart(closed); drawWRChart(closed); drawAssetsChart(all);
+  fetchAndRenderLiquidity();
 
   // Active positions mini-list with live PnL total
   let liveTot=0, hasPx=false;
@@ -2381,7 +2749,6 @@ function drawAssetsChart(all) {
 function buildPriceBar(t, currentPrice) {
   if (!t?.entry) return '';
   const dir   = t.dir || 'long';
-  const sign  = dir === 'long' ? 1 : -1;
   const entry = t.entry;
   const sl    = t.sl   || null;
   const liq   = t.liquidation || null;
@@ -2396,15 +2763,14 @@ function buildPriceBar(t, currentPrice) {
   let minP = Math.min(...allPrices) * 0.998;
   let maxP = Math.max(...allPrices) * 1.002;
   const isBreakeven = sl && Math.abs(sl - entry) / entry < 0.001;
-  // In breakeven, don't artificially limit range — keep all prices visible
   if (!isBreakeven && (maxP - minP) / entry < 0.02) { minP = entry * 0.99; maxP = entry * 1.01; }
   const range = maxP - minP;
   if (range <= 0) return '';
 
-  const pct = p => ((p - minP) / range * 100).toFixed(2);
+  const pct  = p => ((p - minP) / range * 100).toFixed(4);
+  const pctN = p => parseFloat(pct(p));
 
   // Markers
-  const stop = sl || liq || null;
   const markers = [
     ...(liq ? [{v:liq, c:'var(--amber)', l:'Liq', w:1}] : []),
     ...(sl && !isBreakeven ? [{v:sl, c:'var(--red)', l:'SL', w:2}] : []),
@@ -2412,73 +2778,121 @@ function buildPriceBar(t, currentPrice) {
     ...(tp1 ? [{v:tp1, c:'#4ade80', l:'TP1', w:1}] : []),
     ...(tp2 ? [{v:tp2, c:'#22c55e', l:'TP2', w:1}] : []),
     ...(tp3 ? [{v:tp3, c:'#16a34a', l:'TP3', w:1}] : []),
-    ...(cur ? [{v:cur, c:'#60a5fa', l:'', w:3, isCur:true}] : []),
+    ...(cur ? [{v:cur, c:'#3d9cf0', l:'', w:3, isCur:true}] : []),
   ];
 
-  // Color zones
-  const redFrom  = stop && !isBreakeven ? Math.min(entry, stop) : null;
-  const redTo    = stop && !isBreakeven ? Math.max(entry, stop) : null;
+  // ── Color zones ────────────────────────────────────────────────────────────
+  // 1. Red zone: entry ↔ SL (only when SL exists and not breakeven)
+  const hasRedZone = sl && !isBreakeven;
+  const redFrom = hasRedZone ? Math.min(entry, sl) : null;
+  const redTo   = hasRedZone ? Math.max(entry, sl) : null;
 
-  // Green gradient zones (entry → TPs)
+  // 2. Amber zone: SL ↔ Liq (when both SL and Liq exist)
+  //    OR entry ↔ Liq (when no SL — full danger zone)
+  const hasAmberZone = liq != null;
+  const amberFrom = hasAmberZone ? (sl && !isBreakeven ? Math.min(sl, liq) : Math.min(entry, liq)) : null;
+  const amberTo   = hasAmberZone ? (sl && !isBreakeven ? Math.max(sl, liq) : Math.max(entry, liq)) : null;
+  // Warning emoji position: midpoint of amber zone (only when no SL)
+  const warnNoSL  = !sl && liq;
+  const warnMidPct = warnNoSL ? (pctN(amberFrom) + pctN(amberTo)) / 2 : null;
+
+  // 3. Green zones: entry → TPs (progressive opacity, NO clamping)
   const greenZones = [];
-  if (tp1) greenZones.push({from:entry, to:tp1, op:0.3});
-  if (tp2) greenZones.push({from:tp1||entry, to:tp2, op:0.5});
-  if (tp3) greenZones.push({from:tp2||tp1||entry, to:tp3, op:0.7});
+  if (tp1) greenZones.push({from: entry, to: tp1, op: 0.3});
+  if (tp2) greenZones.push({from: tp1||entry, to: tp2, op: 0.5});
+  if (tp3) greenZones.push({from: tp2||tp1||entry, to: tp3, op: 0.72});
 
-  // For short positions, flip the zones
+  // For short: flip green zones so they go from entry toward lower TPs
   if (dir === 'short') {
-    greenZones.forEach(z => {
-      const tmp = z.from; z.from = z.to; z.to = tmp;
-    });
-    if (redFrom !== null) {
-      // Already correct for short
-    }
+    greenZones.forEach(z => { const tmp = z.from; z.from = z.to; z.to = tmp; });
   }
 
-  // Distance info for TPs
-  const tpInfo = [
-    tp1 ? {l:'TP1', v:tp1, rr: sl ? Math.abs((tp1-entry)/(sl-entry)).toFixed(2) : null} : null,
-    tp2 ? {l:'TP2', v:tp2, rr: sl ? Math.abs((tp2-entry)/(sl-entry)).toFixed(2) : null} : null,
-    tp3 ? {l:'TP3', v:tp3, rr: sl ? Math.abs((tp3-entry)/(sl-entry)).toFixed(2) : null} : null,
-  ].filter(Boolean);
+  const zoneDiv = (fromP, toP, color, opacity, extra='') => {
+    const l = Math.min(pctN(fromP), pctN(toP));
+    const r = Math.max(pctN(fromP), pctN(toP));
+    const w = r - l;
+    if (w <= 0) return '';
+    return `<div style="position:absolute;left:${l}%;width:${w}%;height:6px;background:${color};opacity:${opacity};border-radius:3px;${extra}"></div>`;
+  };
 
   return `
   <div style="position:relative;margin:28px 4px 24px;">
-    <!-- Bar background -->
     <div style="position:relative;height:6px;background:var(--bg4);border-radius:3px;">
 
-      <!-- Red zone (entry to SL/Liq) -->
-      ${redFrom !== null ? `<div style="position:absolute;
-        left:${pct(Math.min(redFrom,redTo))}%;
-        width:${Math.abs(parseFloat(pct(redTo))-parseFloat(pct(redFrom)))}%;
-        height:6px;background:var(--red);opacity:.45;border-radius:3px;"></div>` : ''}
+      <!-- Amber zone (Liq risk) -->
+      ${hasAmberZone ? zoneDiv(amberFrom, amberTo, 'var(--amber)', 0.45) : ''}
 
-      <!-- Green zones (entry to TPs) -->
-      ${greenZones.map(z => {
-        const l = parseFloat(pct(Math.min(z.from,z.to)));
-        const r = parseFloat(pct(Math.max(z.from,z.to)));
-        const w = Math.min(r, 98) - l;
-        return `<div style="position:absolute;left:${l}%;width:${Math.max(0,w)}%;height:6px;background:var(--accent);opacity:${z.op};border-radius:3px;"></div>`;
-      }).join('')}
+      <!-- Red zone (Entry to SL) -->
+      ${hasRedZone ? zoneDiv(redFrom, redTo, 'var(--red)', 0.55) : ''}
 
-      <!-- Markers (lines + labels) -->
+      <!-- Green zones (Entry to TPs) -->
+      ${greenZones.map(z => zoneDiv(z.from, z.to, 'var(--accent)', z.op)).join('')}
+
+      <!-- Markers -->
       ${markers.map(m => {
-        const left = parseFloat(pct(m.v));
-        const labelStyle = `position:absolute;font-size:9px;font-family:var(--mono);
-          color:${m.c};white-space:nowrap;transform:translateX(-50%);`;
+        const left = pctN(m.v);
+        const labelStyle = `position:absolute;font-size:9px;font-family:var(--mono);color:${m.c};white-space:nowrap;transform:translateX(-50%);`;
         const priceLabel = m.isCur
           ? `<div style="${labelStyle}top:-18px;font-weight:700;">▼ $${fmtPx(m.v)}</div>`
           : `<div style="${labelStyle}top:-17px;">${m.l}</div>
              <div style="${labelStyle}bottom:-17px;">$${fmtPx(m.v)}</div>`;
-        return `<div style="position:absolute;left:${left}%;top:-2px;bottom:-2px;
-          width:${m.w||1}px;background:${m.c};transform:translateX(-50%);border-radius:1px;">
-          ${priceLabel}
-        </div>`;
+        return `<div style="position:absolute;left:${left}%;top:-2px;bottom:-2px;width:${m.w||1}px;background:${m.c};transform:translateX(-50%);border-radius:1px;">${priceLabel}</div>`;
       }).join('')}
+
+      <!-- No-SL warning emoji centered on amber zone -->
+      ${warnNoSL ? `<div style="position:absolute;left:${warnMidPct}%;transform:translateX(-50%);top:-20px;font-size:13px;line-height:1;" title="Sin Stop Loss configurado">⚠️</div>` : ''}
+
     </div>
   </div>`;
 }
 
+
+// ── Exchange URL helper ────────────────────────────────────────────────────
+function getExchangeUrl(exchange, ticker, dir) {
+  const ex = (exchange||'').toUpperCase();
+  const isSpot = dir === 'spot';
+  const base = ticker ? ticker.replace(/USDT$/,'').replace(/_USDT$/,'') : '';
+  const symUsdt = base + 'USDT';
+  const symUnderscore = base + '_USDT'; // for MEXC commodities like USOIL_USDT
+
+  if (ex === 'BINANCE') {
+    return isSpot
+      ? `https://www.binance.com/en/trade/${base}_USDT`
+      : `https://www.binance.com/en/futures/${symUsdt}`;
+  }
+  if (ex === 'BYBIT') {
+    return isSpot
+      ? `https://www.bybit.com/en/trade/spot/${base}/USDT`
+      : `https://www.bybit.com/trade/usdt/${symUsdt}`;
+  }
+  if (ex === 'OKX') {
+    return isSpot
+      ? `https://www.okx.com/trade-spot/${base.toLowerCase()}-usdt`
+      : `https://www.okx.com/trade-swap/${base.toLowerCase()}-usdt-swap`;
+  }
+  if (ex === 'MEXC') {
+    // MEXC commodities already have underscore format (USOIL_USDT)
+    const mSym = ticker?.includes('_') ? ticker : symUnderscore;
+    return isSpot
+      ? `https://www.mexc.com/exchange/${mSym}`
+      : `https://futures.mexc.com/exchange/${mSym}`;
+  }
+  return null;
+}
+
+// ── Card minimize/maximize memory ──────────────────────────────────────────
+function getCardState() {
+  try { return JSON.parse(localStorage.getItem('mauex_card_state')||'{}'); } catch(e){ return {}; }
+}
+function setCardMinimized(id, minimized) {
+  const s = getCardState(); s[id] = minimized;
+  localStorage.setItem('mauex_card_state', JSON.stringify(s));
+}
+window.toggleCardMin = (id) => {
+  const s = getCardState();
+  setCardMinimized(id, !s[id]);
+  renderPositions(); renderOrders(); renderWatchlist();
+};
 
 function renderWatchlist() {
   const G = window.G; if(!G) return;
@@ -2489,8 +2903,9 @@ function renderWatchlist() {
     container.innerHTML = `<div class="empty"><div class="empty-icon">◻</div><div class="empty-text">No hay setups en watchlist</div><div class="empty-sub">Agregá un setup desde la Calculadora</div></div>`;
     return;
   }
-  // Restart live prices to include watchlist tickers
   if (typeof startLivePrices === 'function') setTimeout(startLivePrices, 100);
+
+  const cardStates = getCardState();
 
   container.innerHTML = items.map(t => {
     const G = window.G;
@@ -2501,81 +2916,97 @@ function renderWatchlist() {
     const slDist = t.entry&&t.sl ? Math.abs(t.sl-t.entry)/t.entry*100 : 0;
     const sign = (t.dir==='short') ? -1 : 1;
     const contr = (t.posSize||0)/(t.entry||1);
-
-    // Distance from current price to entry
+    const riskUsd = t.risk || (t.posSize&&slDist ? t.posSize*slDist/100 : null);
     const distToEntry = currentPrice&&t.entry ? ((t.entry-currentPrice)/currentPrice*100*sign) : null;
     const distColor = distToEntry==null?'var(--t3)':Math.abs(distToEntry)<1?'var(--accent)':Math.abs(distToEntry)<3?'var(--amber)':'var(--t2)';
-
-    // PnL per TP
-    const tpPnl = (tpPrice, pct) => {
+    const tpPnlCalc = (tpPrice, pct) => {
       if(!tpPrice||!t.entry||!t.posSize) return null;
       return Math.round(contr*(tpPrice-t.entry)*sign*(pct/100)*100)/100;
     };
-    const rr = t.tp1&&t.entry&&t.sl ? Math.abs((t.tp1-t.entry)/(t.entry-t.sl)) : 0;
-    const tps = [
-      {l:'TP1',v:t.tp1,pct:t.tp1pct||33},
-      {l:'TP2',v:t.tp2,pct:t.tp2pct||33},
-      {l:'TP3',v:t.tp3,pct:t.tp3pct||34},
-    ].filter(x=>x.v);
+    const rrRisk = t.risk || 0;
+    const rrPnlTP1 = t.tp1&&t.entry&&t.posSize ? Math.abs((t.tp1-t.entry)/t.entry*t.posSize*(t.tp1pct||33)/100) : 0;
+    const rr = rrRisk && rrPnlTP1 ? rrPnlTP1/rrRisk : (t.tp1&&t.entry&&t.sl ? Math.abs((t.tp1-t.entry)/(t.entry-t.sl)) : 0);
+    const tps = [{l:'TP1',v:t.tp1,pct:t.tp1pct||33},{l:'TP2',v:t.tp2,pct:t.tp2pct||33},{l:'TP3',v:t.tp3,pct:t.tp3pct||34}].filter(x=>x.v);
+    const mmrW = 0.005;
+    const wLiq = t.liquidation || (lev>1&&t.entry ? (t.dir==='short' ? t.entry/(1-1/lev+mmrW) : t.entry/(1+1/lev-mmrW)) : null);
+    const fakeT = {...t, liquidation: t.liquidation||wLiq};
+    const isMin = !!cardStates[t.id];
 
-    return `<div class="pos-card" style="margin-bottom:12px;border-left:3px solid var(--red);">
-      <!-- Header -->
-      <div class="pos-card-header" style="margin-bottom:12px;">
+    const minBtn = `<button onclick="window.toggleCardMin('${t.id}')" title="${isMin?'Expandir':'Minimizar'}"
+      style="background:none;border:0.5px solid var(--border2);border-radius:4px;padding:2px 7px;cursor:pointer;color:var(--t3);font-size:11px;line-height:1;flex-shrink:0;">${isMin?'▼':'▲'}</button>`;
+
+    const header = `
+      <div class="pos-card-header" style="margin-bottom:${isMin?'0':'12px'};">
         <div class="pos-card-left" style="flex-wrap:wrap;gap:6px;">
           <div class="status-dot-red" title="Watchlist"></div>
           <span class="pos-card-ticker">${t.ticker||'—'}</span>
           <span class="badge ${t.dir==='long'?'bl':t.dir==='short'?'bs':'bsp'}">${(t.dir||'').toUpperCase()}${lev>1?' x'+lev:''}</span>
+          ${t.exchange?`<a href="${getExchangeUrl(t.exchange, t.ticker, t.dir)||'#'}" target="_blank" rel="noopener" style="font-size:10px;font-family:var(--mono);padding:1px 6px;border-radius:4px;background:var(--bg3);color:var(--t2);text-decoration:none;cursor:pointer;" title="Abrir en ${t.exchange}" onmouseover="this.style.color='var(--t1)'" onmouseout="this.style.color='var(--t2)'">${t.exchange} ↗</a>`:''}
           ${t.traderName?`<span style="font-size:10px;color:var(--t3);font-family:var(--mono);">· ${t.traderName}</span>`:''}
           ${currentPrice?`<span style="font-size:10px;color:${distColor};font-family:var(--mono);">${distToEntry!=null?(distToEntry>=0?'▲ ':'▼ ')+Math.abs(distToEntry).toFixed(2)+'% al entry':''}</span>`:''}
         </div>
-        <div style="text-align:right;">
-          <div style="font-size:10px;color:var(--t3);font-family:var(--mono);">Riesgo $${fmt(t.risk||0)} · Margen $${fmt(margin)}</div>
-          <div style="font-size:10px;color:${rr>=2?'var(--accent)':'var(--red)'};font-family:var(--mono);font-weight:600;">R:R ${rr?rr.toFixed(2)+':1':'—'}</div>
+        <div class="fx" style="gap:8px;align-items:center;">
+          <div style="text-align:right;">
+            <div style="font-size:10px;color:var(--t3);font-family:var(--mono);">Riesgo $${fmt(riskUsd||0)} · Margen $${fmt(margin)}</div>
+            <div style="font-size:10px;color:${rr>=2?'var(--accent)':'var(--red)'};font-family:var(--mono);font-weight:600;">R:R ${rr?rr.toFixed(2)+':1':'—'}</div>
+          </div>
+          ${minBtn}
         </div>
-      </div>
+      </div>`;
 
-      <!-- Levels grid -->
+    if (isMin) {
+      return `<div class="pos-card" style="margin-bottom:12px;border-left:3px solid var(--red);padding-bottom:${fakeT.entry&&(fakeT.sl||fakeT.tp1)?'18px':'14px'};">
+        ${header}
+        ${fakeT.entry&&(fakeT.sl||fakeT.tp1)?`<div style="padding:0 4px;">${buildPriceBar(fakeT, currentPrice||0)}</div>`:''}
+      </div>`;
+    }
+
+    return `<div class="pos-card" style="margin-bottom:12px;border-left:3px solid var(--red);">
+      ${header}
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">
         <div class="pos-mini-metric">
           <div class="pos-mini-lbl">Entry</div>
-          <div class="pos-mini-val">$${fmtPx(t.entry)}</div>
-          <div style="font-size:9px;color:var(--blue);font-family:var(--mono);"
-            data-watchpx="${(t.ticker||'').replace(/USDT|BUSD|USD$/,'').toUpperCase()}"
-            data-watchdir="${t.dir}">
+          <div class="pos-mini-val" style="color:var(--t1);">$${fmtPx(t.entry)}</div>
+          <div style="font-size:9px;color:#3d9cf0;font-family:var(--mono);"
+            data-watchpx="${sym}" data-watchdir="${t.dir}">
             ${currentPrice?'▶ $'+fmtPx(currentPrice):'— precio en vivo'}
           </div>
         </div>
         <div class="pos-mini-metric">
-          <div class="pos-mini-lbl">Stop Loss → <span style="color:var(--red);">-$${fmt(t.risk||0)}</span></div>
-          <div class="pos-mini-val" style="color:var(--red);">$${fmtPx(t.sl)}</div>
-          <div style="font-size:9px;color:var(--t3);font-family:var(--mono);">${slDist.toFixed(2)}% desde entry</div>
+          <div class="pos-mini-lbl">Stop Loss</div>
+          <div class="pos-mini-val" style="color:var(--red);">${t.sl?'$'+fmtPx(t.sl):'—'}</div>
+          <div style="font-size:9px;color:var(--t3);font-family:var(--mono);">
+            ${slDist?slDist.toFixed(2)+'% del entry':''}${riskUsd?` · -$${fmt(riskUsd)}`:''}
+          </div>
         </div>
+        ${wLiq?`<div class="pos-mini-metric">
+          <div class="pos-mini-lbl">Liquidación</div>
+          <div class="pos-mini-val" style="color:var(--amber);">$${fmtPx(wLiq)}</div>
+        </div>`:''}
+        ${margin?`<div class="pos-mini-metric">
+          <div class="pos-mini-lbl">Margen</div>
+          <div class="pos-mini-val" style="color:#a78bfa;">$${fmt(margin)}</div>
+        </div>`:''}
       </div>
-
-      <!-- TPs -->
       ${tps.length?`<div style="display:grid;grid-template-columns:repeat(${tps.length},1fr);gap:8px;margin-bottom:12px;">
         ${tps.map(tp=>{
-          const p = tpPnl(tp.v, tp.pct);
-          const dist = t.entry ? Math.abs((tp.v-t.entry)/t.entry*100).toFixed(2) : '—';
+          const p = tpPnlCalc(tp.v, tp.pct);
+          const dist = t.entry ? Math.abs((tp.v-t.entry)/t.entry*100) : null;
+          const distFromCur = currentPrice&&tp.v ? (tp.v-currentPrice)/currentPrice*100 : null;
+          const tpColor = tp.l==='TP1'?'#4ade80':tp.l==='TP2'?'#22c55e':'#16a34a';
           return `<div class="pos-mini-metric">
-            <div class="pos-mini-lbl">${tp.l} (${tp.pct}%)</div>
-            <div class="pos-mini-val" style="color:var(--accent);">$${fmtPx(tp.v)}</div>
+            <div class="pos-mini-lbl">${tp.l} <span style="color:var(--t3);">(${tp.pct}%)</span></div>
+            <div class="pos-mini-val" style="color:${tpColor};">$${fmtPx(tp.v)}</div>
             <div style="font-size:9px;font-family:var(--mono);">
-              <span style="color:var(--t3);">${dist}%</span>
-              ${p!=null?`<span style="color:var(--accent);margin-left:4px;">+$${fmt(p)}</span>`:''}
+              ${dist!=null?`<span style="color:var(--t3);">${dist.toFixed(2)}%</span>`:''}
+              ${p!=null?`<span style="color:${tpColor};margin-left:4px;">+$${fmt(p)}</span>`:''}
             </div>
+            ${distFromCur!=null?`<div style="font-size:8px;color:var(--t3);font-family:var(--mono);">${fmtP(distFromCur)} desde precio</div>`:''}
           </div>`;
         }).join('')}
       </div>`:''}
-
-      <!-- Price bar full width -->
-      <div style="padding:0 4px;margin-bottom:12px;">
-        ${buildPriceBar(t, currentPrice)}
-      </div>
-
+      <div style="padding:0 4px;margin-bottom:12px;">${buildPriceBar(fakeT, currentPrice||0)}</div>
       ${t.notes?`<div style="font-size:11px;color:var(--t2);padding:6px 10px;background:var(--bg3);border-radius:6px;border-left:2px solid var(--border2);margin-bottom:10px;">${t.notes}</div>`:''}
-
-      <!-- Footer -->
       <div style="display:flex;align-items:center;gap:6px;">
         <select onchange="window.moveCardToStatus('${t.id}', this.value)" style="font-family:var(--mono);font-size:10px;background:var(--bg3);border:0.5px solid var(--border2);color:var(--t2);border-radius:6px;padding:3px 6px;cursor:pointer;">
           <option value="watchlist" selected>👁 Watchlist</option>
@@ -2600,12 +3031,9 @@ function renderPositions() {
 
   const showZombies = window._showZombies || false;
   const allActive   = G.trades().filter(t=>t.status==='active'||t.status==='zombie');
-  const manualActive = showZombies
-    ? allActive
-    : allActive.filter(t=>t.status==='active');
+  const manualActive = showZombies ? allActive : allActive.filter(t=>t.status==='active');
   const zombieCount = allActive.filter(t=>t.status==='zombie').length;
 
-  // Empty state
   if (!allActive.filter(t=>t.status==='active').length && !showZombies) {
     container.innerHTML = `<div class="empty">
       <div class="empty-icon">◻</div>
@@ -2617,9 +3045,17 @@ function renderPositions() {
     return;
   }
 
-  // PnL total from manual positions
+  // Sort by distance to SL (closest = most at risk = first)
+  const sorted = [...manualActive].sort((a, b) => {
+    const pA = G.getPrice(a.ticker, a.dir);
+    const pB = G.getPrice(b.ticker, b.dir);
+    const dA = pA && a.sl ? Math.abs(pA - a.sl) / pA : Infinity;
+    const dB = pB && b.sl ? Math.abs(pB - b.sl) / pB : Infinity;
+    return dA - dB;
+  });
+
   let totalPnl = 0;
-  manualActive.filter(t=>t.status==='active').forEach(t => {
+  sorted.filter(t=>t.status==='active').forEach(t => {
     const price = G.getPrice(t.ticker, t.dir);
     if (!price) return;
     const sign = (t.dir==='short') ? -1 : 1;
@@ -2635,61 +3071,107 @@ function renderPositions() {
       </div>
     </div>` : '';
 
-  const exHtml = '';
+  const cardStates = getCardState();
 
-    // Manual positions cards
-  const manualHtml = manualActive.map(t => {
-    const sym   = t.ticker?.replace(/USDT|BUSD|USD$/,'').toUpperCase() || t.ticker;
-    const price = G.getPrice(t.ticker, t.dir);
-    const sign  = (t.dir==='short'||t.dir==='spot') ? 1 : -1;
-    const contr = (t.posSize||0) / (t.entry||1);
-    const pnl   = price!=null ? Math.round(contr*(price-t.entry)*sign*100)/100 : null;
+  const manualHtml = sorted.map(t => {
+    const sym    = t.ticker?.replace(/USDT|BUSD|USD$/,'').toUpperCase() || t.ticker;
+    const price  = G.getPrice(t.ticker, t.dir);
+    const sign   = (t.dir==='short') ? -1 : 1;
+    const contr  = (t.posSize||0) / (t.entry||1);
+    const pnl    = price!=null ? Math.round(contr*(price-t.entry)*sign*100)/100 : null;
     const margin = t.dir==='spot' ? (t.posSize||0) : (t.posSize||0)/(t.leverage||1);
     const pnlPct = pnl!=null&&margin ? Math.round(pnl/margin*10000)/100 : null;
-    const tps   = [{l:'TP1',v:t.tp1,k:'tp1'},{l:'TP2',v:t.tp2,k:'tp2'},{l:'TP3',v:t.tp3,k:'tp3'}].filter(x=>x.v);
-    const slPct = price&&t.sl ? (t.sl-price)/price*100 : null;
-    // Liquidation estimate: entry ± (margin/posSize * 100)%
-    const liqPct = t.leverage > 1 ? 1/(t.leverage||1) * 0.9 : null;
-    const liq    = liqPct && t.entry ? (t.dir==='short' ? t.entry*(1+liqPct) : t.entry*(1-liqPct)) : null;
+    const tps    = [{l:'TP1',v:t.tp1,k:'tp1',pct:t.tp1pct||33},{l:'TP2',v:t.tp2,k:'tp2',pct:t.tp2pct||33},{l:'TP3',v:t.tp3,k:'tp3',pct:t.tp3pct||34}].filter(x=>x.v);
+    const mmrPos = 0.005;
+    const lev    = t.leverage||1;
+    const liq    = lev > 1 && t.entry ? (t.dir==='short' ? t.entry/(1-1/lev+mmrPos) : t.entry/(1+1/lev-mmrPos)) : null;
     const fakeT  = { entry:t.entry, sl:t.sl, tp1:t.tp1, tp2:t.tp2, tp3:t.tp3, dir:t.dir, liquidation: t.liquidation||liq };
+    const slDistPct = t.sl&&t.entry ? Math.abs(t.sl-t.entry)/t.entry*100 : null;
+    const riskUsd   = t.risk || (t.posSize&&slDistPct ? t.posSize*slDistPct/100 : null);
+    const priceChg  = price&&t.entry ? (price-t.entry)/t.entry*100*sign : null;
+    const isMin = !!cardStates[t.id];
 
-    return `<div class="pos-card" style="border-left:3px solid ${t.status==='zombie'?'#666':'var(--accent)'};${t.status==='zombie'?'opacity:0.6;':''}">
-      <div class="pos-card-header">
+    const minBtn = `<button onclick="window.toggleCardMin('${t.id}')" title="${isMin?'Expandir':'Minimizar'}"
+      style="background:none;border:0.5px solid var(--border2);border-radius:4px;padding:2px 7px;cursor:pointer;color:var(--t3);font-size:11px;line-height:1;flex-shrink:0;">${isMin?'▼':'▲'}</button>`;
+
+    const header = `
+      <div class="pos-card-header" style="margin-bottom:${isMin?'0':'10px'};">
         <div class="pos-card-left">
           <div class="status-dot-green" title="Posición abierta"></div>
           <span class="pos-card-ticker">${t.ticker||'—'}</span>
-          <span class="badge ${t.dir==='long'?'bl':t.dir==='short'?'bs':'bsp'}">${(t.dir||'').toUpperCase()}${(t.leverage||1)>1?' x'+(t.leverage||1):''}</span>
-          ${t.exchange?`<span style="font-size:10px;font-family:var(--mono);padding:1px 6px;border-radius:4px;background:var(--bg3);color:var(--t2);">${t.exchange}</span>`:''}
+          <span class="badge ${t.dir==='long'?'bl':t.dir==='short'?'bs':'bsp'}">${(t.dir||'').toUpperCase()}${lev>1?' x'+lev:''}</span>
+          ${t.exchange?`<a href="${getExchangeUrl(t.exchange, t.ticker, t.dir)||'#'}" target="_blank" rel="noopener" style="font-size:10px;font-family:var(--mono);padding:1px 6px;border-radius:4px;background:var(--bg3);color:var(--t2);text-decoration:none;cursor:pointer;" title="Abrir en ${t.exchange}" onmouseover="this.style.color='var(--t1)'" onmouseout="this.style.color='var(--t2)'">${t.exchange} ↗</a>`:''}
           ${t.traderName?`<span style="font-size:10px;color:var(--t3);font-family:var(--mono);">· ${t.traderName}</span>`:''}
         </div>
-        <div class="fx" style="gap:6px;align-items:baseline;">
-          <div class="pos-card-pnl ${pnl==null?'':pnl>=0?'pnl-pos':'pnl-neg'}"
-            data-pnl="${sym}" data-entry="${t.entry}" data-pos="${t.posSize}" data-dir="${t.dir}" data-manual="true">
-            ${pnl!=null?(pnl>=0?'+':'-')+'$'+fmt(Math.abs(pnl)):'—'}
+        <div class="fx" style="gap:8px;align-items:center;">
+          <div class="fx" style="gap:4px;align-items:baseline;">
+            <div class="pos-card-pnl ${pnl==null?'':pnl>=0?'pnl-pos':'pnl-neg'}"
+              data-pnl="${sym}" data-entry="${t.entry}" data-pos="${t.posSize}" data-dir="${t.dir}" data-manual="true">
+              ${pnl!=null?(pnl>=0?'+':'-')+'$'+fmt(Math.abs(pnl)):'—'}
+            </div>
+            ${pnlPct!=null?`<span style="font-size:11px;color:var(--t2);font-family:var(--mono);">(${fmtP(pnlPct)})</span>`:''}
           </div>
-          ${pnlPct!=null?`<span style="font-size:11px;color:var(--t2);font-family:var(--mono);">(${fmtP(pnlPct)})</span>`:''}
+          ${minBtn}
         </div>
-      </div>
+      </div>`;
+
+    if (isMin) {
+      return `<div class="pos-card" style="border-left:3px solid ${t.status==='zombie'?'#666':'var(--accent)'};${t.status==='zombie'?'opacity:0.6;':''}padding-bottom:${t.entry&&(t.sl||t.tp1)?'18px':'14px'};">
+        ${header}
+        ${t.entry&&(t.sl||t.tp1)?`<div style="padding:0 4px;">${buildPriceBar(fakeT, price||0)}</div>`:''}
+      </div>`;
+    }
+
+    return `<div class="pos-card" style="border-left:3px solid ${t.status==='zombie'?'#666':'var(--accent)'};${t.status==='zombie'?'opacity:0.6;':''}">
+      ${header}
       <div class="pos-card-body">
-        <div class="pos-mini-metric"><div class="pos-mini-lbl">Entry</div><div class="pos-mini-val">$${fmtPx(t.entry)}</div></div>
-        <div class="pos-mini-metric"><div class="pos-mini-lbl">Precio actual</div><div class="pos-mini-val" data-px="${sym}" data-dir="${t.dir}">${price!=null?'$'+fmtPx(price):'—'}</div></div>
-        <div class="pos-mini-metric"><div class="pos-mini-lbl">Margen</div><div class="pos-mini-val" style="color:var(--amber);">$${fmt(margin)}</div></div>
-        <div class="pos-mini-metric"><div class="pos-mini-lbl">Posición</div><div class="pos-mini-val">$${fmt(t.posSize)}</div></div>
-        ${t.sl?`<div class="pos-mini-metric"><div class="pos-mini-lbl">Stop Loss</div><div class="pos-mini-val" style="color:var(--red);">$${fmtPx(t.sl)}</div>${slPct!=null?`<div style="font-size:8px;color:var(--t3);">${fmtP(slPct)}</div>`:''}</div>`:''}
-        ${liq?`<div class="pos-mini-metric"><div class="pos-mini-lbl">Liquidación</div><div class="pos-mini-val" style="color:var(--amber);">$${fmtPx(liq)}</div></div>`:''}
+        <div class="pos-mini-metric">
+          <div class="pos-mini-lbl">Entry</div>
+          <div class="pos-mini-val" style="color:var(--t1);">$${fmtPx(t.entry)}</div>
+        </div>
+        <div class="pos-mini-metric">
+          <div class="pos-mini-lbl">Precio actual</div>
+          <div class="pos-mini-val" style="color:#3d9cf0;" data-px="${sym}" data-dir="${t.dir}">${price!=null?'$'+fmtPx(price):'—'}</div>
+          ${priceChg!=null?`<div style="font-size:8px;color:#3d9cf0;font-family:var(--mono);">${priceChg>=0?'+':''}${priceChg.toFixed(2)}%</div>`:''}
+        </div>
+        <div class="pos-mini-metric">
+          <div class="pos-mini-lbl">Margen</div>
+          <div class="pos-mini-val" style="color:#a78bfa;">$${fmt(margin)}</div>
+        </div>
+        <div class="pos-mini-metric">
+          <div class="pos-mini-lbl">Posición</div>
+          <div class="pos-mini-val">$${fmt(t.posSize)}</div>
+        </div>
+        ${t.sl?`<div class="pos-mini-metric">
+          <div class="pos-mini-lbl">Stop Loss</div>
+          <div class="pos-mini-val" style="color:var(--red);">$${fmtPx(t.sl)}</div>
+          <div style="font-size:8px;color:var(--t3);font-family:var(--mono);">
+            ${slDistPct!=null?slDistPct.toFixed(2)+'% del entry':''}${riskUsd?` · -$${fmt(riskUsd)}`:''}
+          </div>
+        </div>`:''}
+        ${liq?`<div class="pos-mini-metric">
+          <div class="pos-mini-lbl">Liquidación</div>
+          <div class="pos-mini-val" style="color:var(--amber);">$${fmtPx(liq)}</div>
+        </div>`:''}
       </div>
       ${tps.length?`<div class="pos-tps">
         ${tps.map(tp=>{
-          const dist=price?(tp.v-price)/price*100:null;
-          const tpPnl=price?Math.round(contr*(tp.v-t.entry)*(t.dir==='short'?-1:1)*100)/100:null;
-          return `<button class="pos-tp-btn" onclick="closeAtTP('${t.id}','${tp.k}',${tp.v})">
-            <div class="pos-tp-label">${tp.l}</div>
-            <div class="pos-tp-price">$${fmtPx(tp.v)}</div>
-            <div class="pos-tp-dist">${dist!=null?fmtP(dist):''} ${tpPnl!=null?'· '+(tpPnl>=0?'+':'')+fmt(tpPnl):''}</div>
+          const distFromCur = price&&tp.v ? (tp.v-price)/price*100 : null;
+          const tpPnlAmt = t.posSize&&t.entry ? Math.round(contr*(tp.v-t.entry)*(t.dir==='short'?-1:1)*(tp.pct/100)*100)/100 : null;
+          const distFromEntry = tp.v&&t.entry ? Math.abs((tp.v-t.entry)/t.entry*100) : null;
+          const tpColor = tp.l==='TP1'?'#4ade80':tp.l==='TP2'?'#22c55e':'#16a34a';
+          return `<button class="pos-tp-btn" onclick="closeAtTP('${t.id}','${tp.k}',${tp.v})" style="border-color:${tpColor}33;">
+            <div class="pos-tp-label">${tp.l} <span style="color:var(--t3);">(${tp.pct}%)</span></div>
+            <div class="pos-tp-price" style="color:${tpColor};">$${fmtPx(tp.v)}</div>
+            <div class="pos-tp-dist">
+              ${distFromEntry!=null?`<span style="color:var(--t3);">${distFromEntry.toFixed(2)}%</span>`:''}
+              ${tpPnlAmt!=null?`<span style="color:${tpColor};"> +$${fmt(tpPnlAmt)}</span>`:''}
+            </div>
+            ${distFromCur!=null?`<div style="font-size:8px;color:var(--t3);font-family:var(--mono);">${fmtP(distFromCur)} desde precio</div>`:''}
           </button>`;
         }).join('')}
       </div>`:''}
-      ${(t.entry&&(t.sl||t.tp1))?`<div style="padding:0 4px;margin-bottom:12px;">${buildPriceBar(fakeT, price||0)}</div>`:''}
+      ${t.entry&&(t.sl||t.tp1)?`<div style="padding:0 4px;margin-bottom:12px;">${buildPriceBar(fakeT, price||0)}</div>`:''}
       ${t.notes?`<div style="font-size:11px;color:var(--t2);padding:6px 10px;background:var(--bg3);border-radius:6px;border-left:2px solid var(--border2);margin-bottom:8px;">${t.notes}</div>`:''}
       <div class="pos-card-footer">
         <select onchange="window.moveCardToStatus('${t.id}', this.value)" style="font-family:var(--mono);font-size:10px;background:var(--bg3);border:0.5px solid var(--border2);color:var(--t2);border-radius:6px;padding:3px 6px;cursor:pointer;">
@@ -2701,9 +3183,7 @@ function renderPositions() {
           <button class="btn sm" style="background:var(--amber-dim);color:var(--amber);border-color:var(--amber);" onclick="openPartialClose('${t.id}')">Parcial</button>
           <button class="btn acc sm" onclick="openCloseTrade('${t.id}')">Cerrar</button>
           <button class="btn sm" style="font-size:11px;" onclick="window.toggleZombie('${t.id}',true)" title="Archivar como zombie">🧟</button>
-        `:`
-          <button class="btn sm" style="font-size:10px;" onclick="window.toggleZombie('${t.id}',false)">↩ Restaurar</button>
-        `}
+        `:`<button class="btn sm" style="font-size:10px;" onclick="window.toggleZombie('${t.id}',false)">↩ Restaurar</button>`}
         <div style="margin-left:auto;display:flex;gap:6px;">
           <button class="btn sm" onclick="openEditTrade('${t.id}')">✎</button>
           <button class="btn dan sm" onclick="deleteTrade('${t.id}')">✕</button>
@@ -2712,7 +3192,7 @@ function renderPositions() {
     </div>`;
   }).join('');
 
-  container.innerHTML = totalHtml + exHtml + manualHtml;
+  container.innerHTML = totalHtml + manualHtml;
 }
 
 
@@ -2734,11 +3214,238 @@ function checkPendingReviews() {
     } else {
       badge.textContent = pending.length;
     }
-    toast(`${pending.length} trade${pending.length>1?'s':''} pendiente${pending.length>1?'s':''} de revisión en Historial`, 'warning');
+    // pending review badge shown silently — no toast
   } else if (badge) {
     badge.remove();
   }
 }
+
+// ── History sort state
+let _histSort = { col: 'closeDate', dir: -1 };
+window.sortHistory = function(col) {
+  if (_histSort.col === col) _histSort.dir *= -1;
+  else { _histSort.col = col; _histSort.dir = -1; }
+  renderHistory();
+};
+
+function renderHistCharts(trades) {
+  const el = document.getElementById('histCharts');
+  if (!el) return;
+  if (!trades.length) { el.innerHTML=''; return; }
+
+  // Helper: info tooltip on chart titles
+  const info = (text) => `<span title="${text}" style="display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;border:1px solid var(--t3);color:var(--t3);font-size:9px;font-family:sans-serif;cursor:help;margin-left:5px;vertical-align:middle;">i</span>`;
+
+  const sorted = [...trades].sort((a,b)=>new Date(a.closeDate||a.createdAt)-new Date(b.closeDate||b.createdAt));
+  let cum = 0;
+  const equityPoints = sorted.map(t=>{ cum+=t.pnl||0; return { v: cum, date: t.closeDate||t.createdAt?.split('T')[0]||'', pnl: t.pnl||0 }; });
+  const eqVals = equityPoints.map(p=>p.v);
+  const maxEq = Math.max(...eqVals, 0);
+  const minEq = Math.min(...eqVals, 0);
+  const eqRange = maxEq - minEq || 1;
+
+  // Monthly PnL
+  const months = {};
+  sorted.forEach(t=>{ const d=new Date(t.closeDate||t.createdAt); const k=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0'); months[k]=(months[k]||0)+(t.pnl||0); });
+  const mKeys = Object.keys(months).sort();
+  const mVals = mKeys.map(k=>months[k]);
+  const maxM = Math.max(...mVals.map(Math.abs),1);
+
+  // Stats
+  const wins = trades.filter(t=>(t.pnl||0)>0);
+  const losses = trades.filter(t=>(t.pnl||0)<0);
+  const winRate = trades.length ? Math.round(wins.length/trades.length*100) : 0;
+  const avgWin = wins.length ? Math.round(wins.reduce((s,t)=>s+(t.pnl||0),0)/wins.length) : 0;
+  const avgLoss = losses.length ? Math.round(losses.reduce((s,t)=>s+(t.pnl||0),0)/losses.length) : 0;
+  const expectancy = Math.round(((winRate/100)*avgWin+((1-winRate/100)*avgLoss))*100)/100;
+
+  // Trader stats
+  const byTrader = {};
+  trades.forEach(t=>{
+    const n=t.traderName||'Sin trader';
+    if(!byTrader[n]) byTrader[n]={pnl:0,count:0,wins:0,losses:0,sumWin:0,sumLoss:0,maxLoss:0,streak:0,curStreak:0};
+    byTrader[n].pnl+=t.pnl||0;
+    byTrader[n].count++;
+    if((t.pnl||0)>0){ byTrader[n].wins++; byTrader[n].sumWin+=t.pnl; byTrader[n].curStreak=Math.max(0,byTrader[n].curStreak)+1; }
+    else { byTrader[n].losses++; byTrader[n].sumLoss+=t.pnl||0; byTrader[n].maxLoss=Math.min(byTrader[n].maxLoss,t.pnl||0); byTrader[n].curStreak=Math.min(0,byTrader[n].curStreak)-1; }
+  });
+  const trKeys = Object.keys(byTrader).sort((a,b)=>byTrader[b].pnl-byTrader[a].pnl);
+  const maxTrPnl = Math.max(...trKeys.map(k=>Math.abs(byTrader[k].pnl)),1);
+
+  // Drawdown
+  let peak=0, maxDd=0;
+  eqVals.forEach(v=>{ if(v>peak) peak=v; const dd=peak-v; if(dd>maxDd) maxDd=dd; });
+  const totPnl = trades.reduce((s,t)=>s+(t.pnl||0),0);
+
+  // Distribution buckets
+  const pnlVals = trades.map(t=>t.pnl||0);
+  const pMin = Math.min(...pnlVals), pMax = Math.max(...pnlVals);
+  const bucketCount = 8;
+  const bucketSize = (pMax-pMin)/bucketCount || 1;
+  const buckets = Array(bucketCount).fill(0);
+  pnlVals.forEach(v=>{ const i=Math.min(Math.floor((v-pMin)/bucketSize), bucketCount-1); buckets[i]++; });
+  const maxBucket = Math.max(...buckets,1);
+
+  // Monthly bars
+  const barAreaH = 60;
+  const bars = mVals.map((v,i)=>{
+    const h=Math.max(3,Math.abs(v)/maxM*(barAreaH/2));
+    const c=v>=0?'var(--accent)':'var(--red)';
+    const lbl=mKeys[i].split('-')[1]+'/'+mKeys[i].split('-')[0].slice(2);
+    return `<div style="flex:1;display:flex;flex-direction:column;align-items:center;gap:0;">
+      <div style="height:${barAreaH/2}px;display:flex;align-items:flex-end;width:100%;">
+        ${v>=0?`<div title="${v>=0?'+':''}$${fmt(v)}" style="width:100%;height:${h}px;background:${c};border-radius:2px 2px 0 0;opacity:0.85;"></div>`:`<div style="width:100%;height:0;"></div>`}
+      </div>
+      <div style="height:1px;width:100%;background:rgba(255,255,255,0.08);"></div>
+      <div style="height:${barAreaH/2}px;display:flex;align-items:flex-start;width:100%;">
+        ${v<0?`<div title="${fmt(v)}" style="width:100%;height:${h}px;background:${c};border-radius:0 0 2px 2px;opacity:0.85;"></div>`:`<div style="width:100%;height:0;"></div>`}
+      </div>
+      <div style="font-size:8px;color:var(--t3);white-space:nowrap;margin-top:2px;">${mKeys.length<=8?lbl:''}</div>
+    </div>`;
+  }).join('');
+
+  // Trader performance table
+  const trTable = trKeys.map(name=>{
+    const d=byTrader[name];
+    const wr=d.count?Math.round(d.wins/d.count*100):0;
+    const avgW=d.wins?Math.round(d.sumWin/d.wins):0;
+    const avgL=d.losses?Math.round(d.sumLoss/d.losses):0;
+    const bw=Math.max(4,Math.abs(d.pnl)/maxTrPnl*80);
+    const wrColor=wr>=50?'var(--accent)':'var(--red)';
+    return `<div style="display:grid;grid-template-columns:80px 32px 36px 44px 44px 1fr;gap:4px;align-items:center;padding:4px 0;border-bottom:0.5px solid var(--border);">
+      <div style="font-size:10px;color:var(--t2);font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${name}">${name}</div>
+      <div style="font-size:9px;color:var(--t3);text-align:center;">${d.count}</div>
+      <div style="font-size:10px;font-weight:600;font-family:var(--mono);color:${wrColor};text-align:center;">${wr}%</div>
+      <div style="font-size:9px;font-family:var(--mono);color:var(--accent);text-align:right;">+$${fmt(avgW)}</div>
+      <div style="font-size:9px;font-family:var(--mono);color:var(--red);text-align:right;">$${fmt(avgL)}</div>
+      <div style="height:10px;background:var(--bg3);border-radius:2px;overflow:hidden;">
+        <div style="height:100%;width:${bw}%;background:${d.pnl>=0?'var(--accent)':'var(--red)'};border-radius:2px;"></div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const trHeader = `<div style="display:grid;grid-template-columns:80px 32px 36px 44px 44px 1fr;gap:4px;padding-bottom:4px;border-bottom:0.5px solid var(--border2);">
+    <div style="font-size:8px;color:var(--t3);">TRADER</div>
+    <div style="font-size:8px;color:var(--t3);text-align:center;">#</div>
+    <div style="font-size:8px;color:var(--t3);text-align:center;">WR</div>
+    <div style="font-size:8px;color:var(--t3);text-align:right;">AVG W</div>
+    <div style="font-size:8px;color:var(--t3);text-align:right;">AVG L</div>
+    <div style="font-size:8px;color:var(--t3);">PnL</div>
+  </div>`;
+
+  const distBars = buckets.map((count,i)=>{
+    const from=Math.round(pMin+i*bucketSize);
+    const w=Math.max(4,count/maxBucket*100);
+    const c=from>=0?'var(--accent)':'var(--red)';
+    return `<div style="display:flex;align-items:center;gap:6px;">
+      <div style="font-size:9px;color:var(--t3);font-family:var(--mono);width:70px;text-align:right;">${from>=0?'+':''}${fmt(from)}</div>
+      <div style="flex:1;height:14px;background:var(--bg3);border-radius:2px;overflow:hidden;">
+        <div style="height:100%;width:${w}%;background:${c};opacity:0.8;border-radius:2px;"></div>
+      </div>
+      <div style="font-size:9px;color:var(--t2);font-family:var(--mono);min-width:20px;">${count}</div>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = `
+  <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-bottom:12px;">
+    <div class="card" style="padding:14px;">
+      <div style="font-size:10px;color:var(--t3);font-family:var(--mono);margin-bottom:8px;">EQUITY CURVE ${info('PnL acumulado en el tiempo. La línea verde muestra ganancias sobre el capital inicial, la roja pérdidas. El área sombreada indica la zona de ganancia/pérdida. Hover para ver el estado en cada fecha.')}</div>
+      <div style="position:relative;">
+        <canvas id="eqCanvas" height="90" style="width:100%;height:90px;display:block;cursor:crosshair;"></canvas>
+        <div id="eqTooltip" style="display:none;position:absolute;background:var(--bg2);border:0.5px solid var(--border2);border-radius:6px;padding:6px 10px;font-size:10px;font-family:var(--mono);pointer-events:none;z-index:10;white-space:nowrap;"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px;">
+        <span style="font-size:10px;color:var(--t3);">Max DD: <span style="color:var(--red);">-$${fmt(maxDd)}</span></span>
+        <span style="font-size:12px;font-family:var(--mono);font-weight:600;color:${totPnl>=0?'var(--accent)':'var(--red)'};">${totPnl>=0?'+':''}$${fmt(Math.abs(totPnl))}</span>
+      </div>
+    </div>
+    <div class="card" style="padding:14px;display:grid;grid-template-columns:1fr 1fr;gap:10px;align-content:start;">
+      <div style="grid-column:1/-1;font-size:10px;color:var(--t3);font-family:var(--mono);margin-bottom:2px;">ESTADÍSTICAS ${info('Métricas clave de performance. Win Rate: % de trades ganadores. Expectancy: ganancia promedio esperada por trade (positivo = sistema rentable). Avg Win/Loss: promedio de ganancias y pérdidas.')}</div>
+      <div><div style="font-size:9px;color:var(--t3);font-family:var(--mono);">WIN RATE</div><div style="font-size:20px;font-weight:700;font-family:var(--mono);color:${winRate>=50?'var(--accent)':'var(--red)'};">${winRate}%</div></div>
+      <div><div style="font-size:9px;color:var(--t3);font-family:var(--mono);">EXPECTANCY</div><div style="font-size:20px;font-weight:700;font-family:var(--mono);color:${expectancy>=0?'var(--accent)':'var(--red)'};">${expectancy>=0?'+':''}$${fmt(Math.abs(expectancy))}</div></div>
+      <div><div style="font-size:9px;color:var(--t3);font-family:var(--mono);">AVG WIN</div><div style="font-size:16px;font-weight:600;font-family:var(--mono);color:var(--accent);">+$${fmt(avgWin)}</div></div>
+      <div><div style="font-size:9px;color:var(--t3);font-family:var(--mono);">AVG LOSS</div><div style="font-size:16px;font-weight:600;font-family:var(--mono);color:var(--red);">${fmt(avgLoss)}</div></div>
+    </div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px;">
+    <div class="card" style="padding:14px;">
+      <div style="font-size:10px;color:var(--t3);font-family:var(--mono);margin-bottom:8px;">PnL MENSUAL ${info('Resultado neto por mes. Las barras verdes que suben indican meses ganadores, las rojas que bajan indican meses perdedores. El eje central es el punto cero.')}</div>
+      <div style="display:flex;align-items:stretch;gap:4px;height:${barAreaH*2+4}px;">${bars}</div>
+    </div>
+    <div class="card" style="padding:14px;">
+      <div style="font-size:10px;color:var(--t3);font-family:var(--mono);margin-bottom:8px;">PERFORMANCE POR TRADER ${info('Tabla de rendimiento por trader/analista. # = cantidad de trades. WR = win rate. Avg W/L = ganancia y pérdida promedio por trade. La barra muestra el PnL total proporcional.')}</div>
+      ${trHeader}
+      <div style="margin-top:4px;">${trTable}</div>
+    </div>
+    <div class="card" style="padding:14px;">
+      <div style="font-size:10px;color:var(--t3);font-family:var(--mono);margin-bottom:8px;">DISTRIBUCIÓN DE PnL ${info('Histograma de resultados. Cada barra muestra cuántos trades cayeron en ese rango de PnL. Verde = rangos positivos, rojo = negativos. Ideal: muchas barras verdes pequeñas y pocas barras rojas.')}</div>
+      <div style="display:flex;flex-direction:column;gap:5px;">${distBars}</div>
+    </div>
+  </div>`;
+
+  // Draw equity curve on canvas
+  requestAnimationFrame(() => {
+    const canvas = document.getElementById('eqCanvas');
+    if (!canvas) return;
+    const W = canvas.offsetWidth;
+    const H = 90;
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    const pad = 4;
+    const cW = W - pad*2, cH = H - pad*2;
+    const toX = i => pad + i/(Math.max(equityPoints.length-1,1))*cW;
+    const toY = v => pad + cH - (v - minEq)/eqRange * cH;
+    const zeroY2 = toY(0);
+
+    const drawChart = (highlightIdx=-1) => {
+      ctx.clearRect(0,0,W,H);
+      if (minEq<0&&maxEq>0) {
+        ctx.strokeStyle='rgba(255,255,255,0.08)';ctx.setLineDash([4,4]);
+        ctx.beginPath();ctx.moveTo(0,zeroY2);ctx.lineTo(W,zeroY2);ctx.stroke();ctx.setLineDash([]);
+      }
+      if (equityPoints.length < 2) return;
+      const gainGrad=ctx.createLinearGradient(0,0,0,H);
+      gainGrad.addColorStop(0,'rgba(0,196,122,0.3)');gainGrad.addColorStop(1,'rgba(0,196,122,0)');
+      const lossGrad=ctx.createLinearGradient(0,0,0,H);
+      lossGrad.addColorStop(0,'rgba(240,61,61,0)');lossGrad.addColorStop(1,'rgba(240,61,61,0.3)');
+      ctx.beginPath();ctx.moveTo(toX(0),zeroY2);
+      equityPoints.forEach((p,i)=>ctx.lineTo(toX(i),toY(p.v)));
+      ctx.lineTo(toX(equityPoints.length-1),zeroY2);ctx.closePath();
+      ctx.save();ctx.rect(0,0,W,zeroY2);ctx.clip();ctx.fillStyle=gainGrad;ctx.fill();ctx.restore();
+      ctx.save();ctx.rect(0,zeroY2,W,H);ctx.clip();ctx.fillStyle=lossGrad;ctx.fill();ctx.restore();
+      for(let i=1;i<equityPoints.length;i++){
+        ctx.strokeStyle=equityPoints[i].v>=0?'#00c47a':'#f03d3d';
+        ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(toX(i-1),toY(equityPoints[i-1].v));ctx.lineTo(toX(i),toY(equityPoints[i].v));ctx.stroke();
+      }
+      ctx.fillStyle='rgba(100,120,140,0.6)';ctx.font='9px monospace';
+      const lc=Math.min(4,equityPoints.length);
+      for(let i=0;i<lc;i++){const idx=Math.floor(i/(lc-1||1)*(equityPoints.length-1));const x=toX(idx);const date=equityPoints[idx].date?.slice(0,7)||'';ctx.fillText(date,Math.min(x,W-44),H-1);}
+      if(highlightIdx>=0){
+        const x=toX(highlightIdx),y=toY(equityPoints[highlightIdx].v);
+        ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.lineWidth=0.5;ctx.setLineDash([2,2]);
+        ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,H);ctx.stroke();ctx.setLineDash([]);
+        ctx.beginPath();ctx.arc(x,y,3,0,Math.PI*2);ctx.fillStyle=equityPoints[highlightIdx].v>=0?'#00c47a':'#f03d3d';ctx.fill();
+      }
+    };
+    drawChart();
+    const tooltip=document.getElementById('eqTooltip');
+    canvas.onmousemove=e=>{
+      const rect=canvas.getBoundingClientRect();
+      const mx=e.clientX-rect.left;
+      const idx=Math.max(0,Math.min(equityPoints.length-1,Math.round((mx-pad)/cW*(equityPoints.length-1))));
+      const pt=equityPoints[idx];
+      drawChart(idx);
+      const x=toX(idx),y=toY(pt.v);
+      tooltip.style.display='block';
+      tooltip.style.left=(x+12>W-110?x-110:x+12)+'px';
+      tooltip.style.top=Math.max(0,y-28)+'px';
+      tooltip.innerHTML=`<span style="color:var(--t3);">${pt.date}</span><br><span style="color:${pt.v>=0?'var(--accent)':'var(--red)'};">${pt.v>=0?'+':''}$${fmt(Math.abs(pt.v))}</span> <span style="font-size:9px;color:var(--t3);">(${pt.pnl>=0?'+':''}$${fmt(pt.pnl)})</span>`;
+    };
+    canvas.onmouseleave=()=>{tooltip.style.display='none';drawChart();};
+  });
+}
+
 
 function renderHistory() {
   const G = window.G; if(!G) return;
@@ -2747,7 +3454,7 @@ function renderHistory() {
   const filtDir    = document.getElementById('filtDir')?.value||'';
   const filtTrader = document.getElementById('filtTrader')?.value||'';
   const filtResult = document.getElementById('filtResult')?.value||'';
-  const filtered   = closed.filter(t=>{
+  let filtered = closed.filter(t=>{
     if(filtTicker&&!t.ticker?.toLowerCase().includes(filtTicker)) return false;
     if(filtDir&&t.dir!==filtDir) return false;
     if(filtTrader&&t.traderName!==filtTrader) return false;
@@ -2755,39 +3462,52 @@ function renderHistory() {
     if(filtResult==='loss'&&(t.pnl||0)>=0) return false;
     return true;
   });
-  const wins    = filtered.filter(t=>(t.pnl||0)>0).length;
-  const totPnl  = filtered.reduce((s,t)=>s+(t.pnl||0),0);
-  document.getElementById('histStats').textContent =
-    `${filtered.length} trades · WR: ${filtered.length?Math.round(wins/filtered.length*100):0}% · PnL: ${totPnl>=0?'+':''}$${fmt(Math.abs(totPnl))}`;
+  // Sort
+  const colMap = {ticker:'ticker',dir:'dir',exchange:'exchange',trader:'traderName',entry:'entry',exit:'closePrice',pnl:'pnl',pnlpct:'pnlPct',fentrada:'createdAt',fcierre:'closeDate'};
+  const sortKey = colMap[_histSort.col] || 'closeDate';
+  filtered = [...filtered].sort((a,b)=>{ const av=a[sortKey]||'', bv=b[sortKey]||''; return (typeof av==='number')?(av-bv)*_histSort.dir:String(av).localeCompare(String(bv))*_histSort.dir; });
+  // Charts use all closed trades
+  renderHistCharts(closed);
+  const wins = filtered.filter(t=>(t.pnl||0)>0).length;
+  const totPnl = filtered.reduce((s,t)=>s+(t.pnl||0),0);
+  document.getElementById('histStats').textContent = filtered.length+' trades · WR: '+(filtered.length?Math.round(wins/filtered.length*100):0)+'% · PnL: '+(totPnl>=0?'+':'')+'$'+fmt(Math.abs(totPnl));
+  // Trader filter
+  const traders = [...new Set(closed.map(t=>t.traderName).filter(Boolean))];
+  const ftEl = document.getElementById('filtTrader');
+  if(ftEl){ const cur=ftEl.value; ftEl.innerHTML='<option value="">Trader</option>'+traders.map(n=>'<option'+(n===cur?' selected':'')+'>'+n+'</option>').join(''); }
   const tbody = document.getElementById('histTbody');
-  if (!filtered.length) {
-    tbody.innerHTML = `<tr><td colspan="11"><div class="empty"><div class="empty-text">Sin trades cerrados</div></div></td></tr>`;
-    return;
-  }
+  if (!filtered.length) { tbody.innerHTML='<tr><td colspan="13"><div class="empty"><div class="empty-text">Sin trades cerrados</div></div></td></tr>'; return; }
+  // Sortable headers
+  const si = col => _histSort.col===col?(_histSort.dir===1?'↑':'↓'):'';
+  const thead = tbody.closest('table')?.querySelector('thead tr');
+  if(thead) thead.innerHTML=[['ticker','Ticker'],['dir','Dir'],['exchange','Exchange'],['trader','Trader'],['entry','Entry px'],['exit','Exit px'],['pnl','PnL'],['pnlpct','PnL%'],['fentrada','F.Entrada'],['fcierre','F.Cierre'],['','Resultado'],['','Notas'],['','']].map(([col,lbl])=>col?`<th style="cursor:pointer;user-select:none;" onclick="sortHistory('${col}')">${lbl} ${si(col)}</th>`:`<th>${lbl}</th>`).join('');
   tbody.innerHTML = filtered.map(t=>{
-    const allNotes = [t.notes, t.closeNotes].filter(Boolean).join(' · ');
+    const allNotes=[t.notes,t.closeNotes].filter(Boolean).join(' · ');
+    const pnlCls=(t.pnl||0)>=0?'pnl-pos':'pnl-neg';
+    const pnlPctCls=(t.pnlPct||0)>=0?'pnl-pos':'pnl-neg';
+    const dirBadge=t.dir==='long'?'bl':t.dir==='short'?'bs':'bsp';
+    const resBadge=(t.pnl||0)>=0?'bl':'bs';
+    const resLabel=(t.pnl||0)>=0?'WIN':'LOSS';
     return `<tr style="cursor:pointer;" onclick="toggleHistNote('note-${t.id}')">
-    <td><strong>${t.ticker||'—'}</strong></td>
-    <td><span class="badge ${t.dir==='long'?'bl':t.dir==='short'?'bs':'bsp'}">${(t.dir||'').toUpperCase()}</span></td>
-    <td style="color:var(--t2);">${t.exchange?.toUpperCase()||'—'}</td>
-    <td style="color:var(--t2);">${t.traderName||'—'}</td>
-    <td style="font-family:var(--mono);">$${fmtPx(t.entry)}</td>
-    <td style="font-family:var(--mono);">${t.closePrice?'$'+fmtPx(t.closePrice):'—'}</td>
-    <td class="${(t.pnl||0)>=0?'pnl-pos':'pnl-neg'}">${t.pnl!=null?(t.pnl>=0?'+':'')+fmt(t.pnl):'—'}</td>
-    <td class="${(t.pnlPct||0)>=0?'pnl-pos':'pnl-neg'}">${t.pnlPct!=null?fmtP(t.pnlPct):'—'}</td>
-    <td style="color:var(--t3);font-size:10px;">${t.createdAt?fmtD(t.createdAt):'—'}</td>
-    <td style="color:var(--t3);font-size:10px;">${fmtD(t.closeDate||t.updatedAt)}</td>
-    <td><span class="badge ${(t.pnl||0)>=0?'bl':'bs'}">${(t.pnl||0)>=0?'WIN':'LOSS'}</span></td>
-    <td style="color:var(--t2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;">${allNotes||'—'}</td>
-    <td onclick="event.stopPropagation()" style="white-space:nowrap;">
-      <button class="btn sm" onclick="openEditTrade('${t.id}')">✎</button>
-      <button class="btn dan sm" onclick="deleteTrade('${t.id}')">✕</button>
-    </td>
-  </tr>
-  ${allNotes?`<tr id="note-${t.id}" style="display:none;"><td colspan="13" style="background:var(--bg3);padding:10px 12px;font-size:11px;color:var(--t2);border-left:2px solid var(--border2);">${allNotes}</td></tr>`:''}`;
+      <td><strong>${t.ticker||'—'}</strong></td>
+      <td><span class="badge ${dirBadge}">${(t.dir||'').toUpperCase()}</span></td>
+      <td style="color:var(--t2);">${t.exchange?.toUpperCase()||'—'}</td>
+      <td style="color:var(--t2);">${t.traderName||'—'}</td>
+      <td style="font-family:var(--mono);">$${fmtPx(t.entry)}</td>
+      <td style="font-family:var(--mono);">${t.closePrice?'$'+fmtPx(t.closePrice):'—'}</td>
+      <td class="${pnlCls}">${t.pnl!=null?(t.pnl>=0?'+':'')+fmt(t.pnl):'—'}</td>
+      <td class="${pnlPctCls}">${t.pnlPct!=null?fmtP(t.pnlPct):'—'}</td>
+      <td style="color:var(--t3);font-size:10px;">${t.createdAt?fmtD(t.createdAt):'—'}</td>
+      <td style="color:var(--t3);font-size:10px;">${fmtD(t.closeDate||t.updatedAt)}</td>
+      <td><span class="badge ${resBadge}">${resLabel}</span></td>
+      <td style="color:var(--t2);max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;">${allNotes||'—'}</td>
+      <td onclick="event.stopPropagation()" style="white-space:nowrap;">
+        <button class="btn sm" onclick="openEditTrade('${t.id}')">✎</button>
+        <button class="btn dan sm" onclick="deleteTrade('${t.id}')">✕</button>
+      </td>
+    </tr>${allNotes?`<tr id="note-${t.id}" style="display:none;"><td colspan="13" style="background:var(--bg3);padding:10px 12px;font-size:11px;color:var(--t2);border-left:2px solid var(--border2);">${allNotes}</td></tr>`:''}`;
   }).join('');
 }
-
 // ── Traders page ───────────────────────────────────────────────────────────
 function renderTraders() {
   const G = window.G; if(!G) return;
@@ -2972,11 +3692,13 @@ window.saveEditTrade = async () => {
   const eDate = document.getElementById('eDate').value;
   if(!ticker||!entry){ toast('Completá ticker y entry como mínimo.','error'); return; }
 
-  // Calculate posSize: use manual size, or derive from risk+SL, or 0
+  // Calculate posSize: derive from risk+SL if both exist, else use manual size
   const sizeEl = document.getElementById('eSize');
   const manualSize = parseFloat(sizeEl?.value)||0;
   const slDist = sl && entry ? Math.abs(sl-entry)/entry : 0;
-  const posSize = manualSize > 0 ? manualSize : (risk && slDist ? risk/slDist : 0);
+  // If we have risk AND SL, always derive posSize from risk (source of truth)
+  // Only use manual size if no risk or no SL
+  const posSize = (risk && slDist) ? Math.round(risk/slDist*100)/100 : (manualSize || 0);
 
   try {
     await window._fb.updateDoc(window._fb.doc(window._fb.db,'trades',id), {
@@ -2990,10 +3712,10 @@ window.saveEditTrade = async () => {
     await window._loadTrades();
     closeModal('editTradeModal');
     // Re-render current page
-    ['dashPage','watchPage','posPage','histPage'].forEach(pid=>{
+    ['dashPage','watchPage','ordersPage','posPage','histPage'].forEach(pid=>{
       const el=document.getElementById(pid);
       if(el&&el.style.display!=='none'){
-        const fn={dashPage:renderDashboard,watchPage:renderWatchlist,posPage:renderPositions,histPage:renderHistory}[pid];
+        const fn={dashPage:renderDashboard,watchPage:renderWatchlist,ordersPage:renderOrders,posPage:renderPositions,histPage:renderHistory}[pid];
         if(fn) fn();
       }
     });
@@ -4152,13 +4874,15 @@ window.syncAllExchanges = async () => {
       exchangeOrders           = data.orders    || [];
       lastSyncTime             = new Date();
 
+      // Cache liquidity data for dashboard
+      if (data.liquidity) window._updateLiquidityCache(data);
+
       try { renderPositions(); } catch(e) { console.error('renderPositions error:', e); }
       try { renderOrders(); } catch(e) { console.error('renderOrders error:', e); }
       try { updateStatusBar(); } catch(e) { console.error('updateStatusBar error:', e); }
 
       const count = exchangePositions.length;
       const msg   = `✅ ${count} posición${count!==1?'es':''} · PnL $${(data.totalPnl||0).toFixed(0)}`;
-      toast(msg);
       const syncBtnEl = document.getElementById('syncBtn');
       if(syncBtnEl){ syncBtnEl.textContent = msg; syncBtnEl.disabled = false; }
 
@@ -4259,12 +4983,7 @@ function startAutoSync() {
   if(syncTimer) clearInterval(syncTimer);
   // Sync positions every 30s (exchange rate limit friendly)
   // PnL updates in real-time via WebSocket (setPrice → updatePriceEl)
-  syncTimer = setInterval(async ()=>{
-    const posPage = document.getElementById('posPage');
-    if(posPage&&posPage.style.display!=='none') {
-      await syncAllExchanges();
-    }
-  }, 30000);
+  // Auto-sync removed — positions are manual, prices update via WebSocket
 }
 
 // ── AI Analysis autocomplete ───────────────────────────────────────────────
@@ -5010,61 +5729,83 @@ function renderOrders() {
     return;
   }
 
-  container.innerHTML = allOrders.map(o=>{
+  // Sort by distance to entry (closest = executes soonest = first)
+  const sortedOrders = [...allOrders].sort((a, b) => {
+    const G = window.G;
+    const symA = a.ticker?.replace(/USDT|BUSD$/,'').toUpperCase() || a.ticker;
+    const symB = b.ticker?.replace(/USDT|BUSD$/,'').toUpperCase() || b.ticker;
+    const pA = G?.getPrice(symA, a.dir) || G?.getPrice(symA+'USDT', a.dir) || 0;
+    const pB = G?.getPrice(symB, b.dir) || G?.getPrice(symB+'USDT', b.dir) || 0;
+    const eA = a.entry || a.price || 0;
+    const eB = b.entry || b.price || 0;
+    const dA = pA&&eA ? Math.abs(pA-eA)/pA : Infinity;
+    const dB = pB&&eB ? Math.abs(pB-eB)/pB : Infinity;
+    return dA - dB;
+  });
+
+  const cardStates = getCardState();
+
+  container.innerHTML = sortedOrders.map(o=>{
     const G = window.G;
     const sym = o.ticker?.replace(/USDT|BUSD$/,'').toUpperCase() || o.ticker;
     const currentPrice = G?.getPrice(sym, o.dir) || G?.getPrice(sym+'USDT', o.dir) || G?.getPrice(o.symbol?.replace(/USDT$/,''), o.dir) || 0;
-    // Soporta tanto el nuevo formato (entry/totalSize) como el viejo (price/size)
     const entryPrice = o.entry || o.price || 0;
     const totalSize  = o.totalSize || o.size || 0;
     const dist = currentPrice&&entryPrice ? ((entryPrice-currentPrice)/currentPrice*100) : null;
     const distAbs = dist!=null ? Math.abs(dist) : null;
     const distColor = distAbs==null?'var(--t3)':distAbs<1?'var(--accent)':distAbs<3?'var(--amber)':'var(--t2)';
     const exColor = o.exchange==='BINANCE'?'#f0b90b':o.exchange==='BYBIT'?'#f7a600':o.exchange==='MEXC'?'#00b8d9':'#00a0ea';
-    const sign = o.dir==='long' ? 1 : -1;
-
-    // Liquidación: usar la del backend si existe, si no calcular aprox
-    const lev = o.leverage||10;
-    const liqApprox = o.liquidation || (entryPrice ? Math.round(entryPrice * (1 - sign/lev*0.9) * 100)/100 : null);
-
-    // SL and TPs from order data
+    const lev = o.leverage || 1;
+    const mmrO = 0.005;
+    const liqApprox = lev > 1 ? (o.liquidation || (entryPrice ? (o.dir==='short' ? entryPrice/(1-1/lev+mmrO) : entryPrice/(1+1/lev-mmrO)) : null)) : null;
     const sl  = o.sl  || null;
     const tp1 = o.tp1 || null;
     const tp2 = o.tp2 || null;
     const tp3 = o.tp3 || null;
+    const fakeT = { entry:entryPrice, sl, tp1, tp2, tp3, dir:o.dir, liquidation: liqApprox };
+    const distToOrder = currentPrice&&entryPrice ? fmtP((entryPrice-currentPrice)/currentPrice*100) : '—';
+    const slDistPct = sl&&entryPrice ? Math.abs(sl-entryPrice)/entryPrice*100 : null;
+    const riskUsd = totalSize&&slDistPct ? totalSize*slDistPct/100 : null;
+    const tpList = [{l:'TP1',v:tp1,pct:o.tp1pct||33},{l:'TP2',v:tp2,pct:o.tp2pct||33},{l:'TP3',v:tp3,pct:o.tp3pct||34}].filter(x=>x.v);
 
-    // Build fake trade for price bar
-    const fakeT = { entry:entryPrice, sl, tp1, tp2, tp3, dir:o.dir };
+    const isMin = !!cardStates[o.exchangeId];
+    const cardId = o.exchangeId;
+    const minBtn = `<button onclick="window.toggleCardMin('${cardId}')" title="${isMin?'Expandir':'Minimizar'}"
+      style="background:none;border:0.5px solid var(--border2);border-radius:4px;padding:2px 7px;cursor:pointer;color:var(--t3);font-size:11px;line-height:1;flex-shrink:0;">${isMin?'▼':'▲'}</button>`;
 
-    // Distance from current price to order price
-    const distToOrder = currentPrice&&entryPrice
-      ? fmtP((entryPrice-currentPrice)/currentPrice*100)
-      : '—';
-
-    return `<div class="pos-card" style="border-left:3px solid ${exColor};margin-bottom:10px;" id="order-card-${o.exchangeId}">
-      <!-- Header -->
-      <div class="pos-card-header" style="margin-bottom:12px;">
+    const header = `
+      <div class="pos-card-header" style="margin-bottom:${isMin?'0':'12px'};">
         <div class="pos-card-left" style="flex-wrap:wrap;gap:6px;">
           <div class="status-dot-amber" title="Orden pendiente"></div>
           <span class="pos-card-ticker">${o.ticker}</span>
           <span class="badge ${o.dir==='long'?'bl':'bs'}">${o.dir.toUpperCase()}</span>
-          <span style="background:${exColor}22;color:${exColor};padding:1px 6px;border-radius:4px;font-size:10px;font-family:var(--mono);">${o.exchange}</span>
-          <span style="font-size:10px;color:var(--t2);font-family:var(--mono);">${o.type||'LIMIT'}</span>
+          <a href="${getExchangeUrl(o.exchange, o.ticker, o.dir)||'#'}" target="_blank" rel="noopener" style="background:${exColor}22;color:${exColor};padding:1px 6px;border-radius:4px;font-size:10px;font-family:var(--mono);text-decoration:none;cursor:pointer;" title="Abrir en ${o.exchange}" onmouseover="this.style.opacity='0.75'" onmouseout="this.style.opacity='1'">${o.exchange} ↗</a>
           <span style="background:var(--amber-dim);color:var(--amber);padding:1px 6px;border-radius:4px;font-size:9px;font-family:var(--mono);">${o.type==='GROUPED'?'AGRUPADA':'PENDIENTE'}</span>
           ${o.type==='GROUPED'?`<button onclick="window.ungroupOrder('${o.exchangeId}')" style="background:var(--bg3);border:0.5px solid var(--border2);padding:1px 8px;border-radius:4px;font-size:9px;font-family:var(--mono);color:var(--t2);cursor:pointer;">✕ Desagrupar</button>`:''}
           ${currentPrice?`<span style="font-size:10px;color:${distColor};font-family:var(--mono);">${distToOrder} al entry</span>`:''}
         </div>
-        <div style="text-align:right;">
-          <div style="font-family:var(--mono);font-size:15px;font-weight:600;">$${fmtPx(entryPrice)}</div>
-          <div style="font-size:10px;color:var(--t3);font-family:var(--mono);">entry${lev&&o.leverage?` · ${lev}x`:''} · tamaño $${fmt(totalSize)}</div>
+        <div class="fx" style="gap:8px;align-items:center;">
+          <div style="text-align:right;">
+            <div style="font-family:var(--mono);font-size:15px;font-weight:600;color:var(--t1);">$${fmtPx(entryPrice)}</div>
+            <div style="font-size:10px;color:var(--t3);font-family:var(--mono);">entry${lev&&o.leverage?` · ${lev}x`:''} · $${fmt(totalSize)}</div>
+          </div>
+          ${minBtn}
         </div>
-      </div>
+      </div>`;
 
-      <!-- Metrics -->
+    if (isMin) {
+      return `<div class="pos-card" style="border-left:3px solid ${exColor};margin-bottom:10px;padding-bottom:${entryPrice&&(sl||tp1)?'18px':'14px'};" id="order-card-${cardId}">
+        ${header}
+        ${entryPrice&&(sl||tp1)?`<div style="padding:0 4px;">${buildPriceBar(fakeT, currentPrice||0)}</div>`:''}
+      </div>`;
+    }
+
+    return `<div class="pos-card" style="border-left:3px solid ${exColor};margin-bottom:10px;" id="order-card-${cardId}">
+      ${header}
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px;">
         <div class="pos-mini-metric">
           <div class="pos-mini-lbl">Precio actual</div>
-          <div class="pos-mini-val" data-px="${o.ticker}" data-dir="${o.dir}">${currentPrice?'$'+fmtPx(currentPrice):'—'}</div>
+          <div class="pos-mini-val" style="color:#3d9cf0;" data-px="${o.ticker}" data-dir="${o.dir}">${currentPrice?'$'+fmtPx(currentPrice):'—'}</div>
         </div>
         <div class="pos-mini-metric">
           <div class="pos-mini-lbl">Distancia al entry</div>
@@ -5073,38 +5814,34 @@ function renderOrders() {
         ${sl?`<div class="pos-mini-metric">
           <div class="pos-mini-lbl">Stop Loss</div>
           <div class="pos-mini-val" style="color:var(--red);">$${fmtPx(sl)}</div>
-          ${currentPrice?`<div style="font-size:9px;color:var(--t3);font-family:var(--mono);">${fmtP((sl-currentPrice)/currentPrice*100)}</div>`:''}
+          <div style="font-size:9px;color:var(--t3);font-family:var(--mono);">
+            ${slDistPct!=null?slDistPct.toFixed(2)+'% del entry':''}${riskUsd?` · -$${fmt(riskUsd)}`:''}
+          </div>
         </div>`:''}
         ${liqApprox?`<div class="pos-mini-metric">
           <div class="pos-mini-lbl">Liq. aprox.</div>
           <div class="pos-mini-val" style="color:var(--amber);">$${fmtPx(liqApprox)}</div>
         </div>`:''}
       </div>
-
-      <!-- TPs -->
-      ${[{l:'TP1',v:tp1},{l:'TP2',v:tp2},{l:'TP3',v:tp3}].filter(x=>x.v).length?`
-      <div style="display:grid;grid-template-columns:repeat(${[tp1,tp2,tp3].filter(Boolean).length},1fr);gap:8px;margin-bottom:12px;">
-        ${[{l:'TP1',v:tp1},{l:'TP2',v:tp2},{l:'TP3',v:tp3}].filter(x=>x.v).map(tp=>{
-          const d = currentPrice&&tp.v ? fmtP((tp.v-currentPrice)/currentPrice*100) : '—';
+      ${tpList.length?`<div style="display:grid;grid-template-columns:repeat(${tpList.length},1fr);gap:8px;margin-bottom:12px;">
+        ${tpList.map(tp=>{
+          const distFromEntry = tp.v&&entryPrice ? Math.abs((tp.v-entryPrice)/entryPrice*100) : null;
+          const distFromCur = currentPrice&&tp.v ? (tp.v-currentPrice)/currentPrice*100 : null;
+          const tpPnlAmt = totalSize&&entryPrice ? Math.round((totalSize/entryPrice)*(tp.v-entryPrice)*(o.dir==='short'?-1:1)*(tp.pct/100)*100)/100 : null;
+          const tpColor = tp.l==='TP1'?'#4ade80':tp.l==='TP2'?'#22c55e':'#16a34a';
           return `<div class="pos-mini-metric">
-            <div class="pos-mini-lbl">${tp.l}</div>
-            <div class="pos-mini-val" style="color:var(--accent);">$${fmtPx(tp.v)}</div>
-            <div style="font-size:9px;color:var(--t3);font-family:var(--mono);">${d}</div>
+            <div class="pos-mini-lbl">${tp.l} <span style="color:var(--t3);">(${tp.pct}%)</span></div>
+            <div class="pos-mini-val" style="color:${tpColor};">$${fmtPx(tp.v)}</div>
+            <div style="font-size:9px;font-family:var(--mono);">
+              ${distFromEntry!=null?`<span style="color:var(--t3);">${distFromEntry.toFixed(2)}%</span>`:''}
+              ${tpPnlAmt!=null?`<span style="color:${tpColor};margin-left:4px;">+$${fmt(tpPnlAmt)}</span>`:''}
+            </div>
+            ${distFromCur!=null?`<div style="font-size:8px;color:var(--t3);font-family:var(--mono);">${fmtP(distFromCur)} desde precio</div>`:''}
           </div>`;
         }).join('')}
       </div>`:''}
-
-      <!-- No SL warning -->
-      ${!sl?`<div style="background:var(--red-dim);border:0.5px solid var(--red);border-radius:6px;padding:6px 12px;font-size:11px;color:var(--red);margin-bottom:10px;">
-        ⚠️ Sin Stop Loss — posición de riesgo ilimitado si se ejecuta
-      </div>`:''}
-
-      <!-- Price map -->
-      ${(entryPrice&&(sl||tp1))?`<div style="padding:0 4px;margin-bottom:10px;">
-        ${buildPriceBar(fakeT, currentPrice)}
-      </div>`:''}
-
-      <!-- Acciones manuales -->
+      ${!sl?`<div style="background:var(--red-dim);border:0.5px solid var(--red);border-radius:6px;padding:6px 12px;font-size:11px;color:var(--red);margin-bottom:10px;">⚠️ Sin Stop Loss — posición de riesgo ilimitado si se ejecuta</div>`:''}
+      ${entryPrice&&(sl||tp1||liqApprox)?`<div style="padding:0 4px;margin-bottom:10px;">${buildPriceBar(fakeT, currentPrice||0)}</div>`:''}
       ${o._manual ? `
       <div style="display:flex;align-items:center;gap:6px;margin-top:10px;padding-top:10px;border-top:0.5px solid var(--border);">
         <select onchange="window.moveCardToStatus('${o.id}', this.value)" style="font-family:var(--mono);font-size:10px;background:var(--bg3);border:0.5px solid var(--border2);color:var(--t2);border-radius:6px;padding:3px 6px;cursor:pointer;">
