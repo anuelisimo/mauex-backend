@@ -332,6 +332,129 @@ async function syncMEXC(env) {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
+// BALANCES — free USDT/USDC not locked in positions or orders
+// ═════════════════════════════════════════════════════════════════════════════
+async function fetchBalances(env) {
+  const balances = {};
+  const errors   = {};
+
+  // ── Binance via Railway ──────────────────────────────────────────────────
+  const railwayUrl = (env.RAILWAY_URL || '').trim();
+  if (railwayUrl) {
+    try {
+      const r = await safeFetch(`${railwayUrl}/binance-balance`);
+      if (r.ok && r.data?.balances) {
+        balances.BINANCE = r.data.balances; // { USDT: 1234.56, USDC: 0 }
+      } else {
+        errors.BINANCE = r.data?.error || `${r.status}`;
+      }
+    } catch(e) { errors.BINANCE = e.message; }
+  }
+
+  // ── Bybit ────────────────────────────────────────────────────────────────
+  const bybitKey = (env.BYBIT_KEY || '').trim();
+  const bybitSec = (env.BYBIT_SECRET || '').trim();
+  if (bybitKey && bybitSec) {
+    try {
+      const ts  = Date.now().toString();
+      const q   = 'accountType=UNIFIED';
+      const msg = ts + bybitKey + '5000' + q;
+      const sig = await hmac256(bybitSec, msg);
+      const r   = await safeFetch(
+        `https://api.bybit.com/v5/account/wallet-balance?${q}`,
+        { headers: { 'X-BAPI-API-KEY': bybitKey, 'X-BAPI-TIMESTAMP': ts,
+                     'X-BAPI-SIGN': sig, 'X-BAPI-RECV-WINDOW': '5000' } }
+      );
+      if (r.ok && r.data?.retCode === 0) {
+        const coins = r.data.result?.list?.[0]?.coin || [];
+        const usdt  = coins.find(c => c.coin === 'USDT');
+        const usdc  = coins.find(c => c.coin === 'USDC');
+        balances.BYBIT = {
+          USDT: Math.round(parseFloat(usdt?.availableToWithdraw || 0) * 100) / 100,
+          USDC: Math.round(parseFloat(usdc?.availableToWithdraw || 0) * 100) / 100,
+        };
+      } else {
+        errors.BYBIT = r.data?.retMsg || `${r.status}`;
+      }
+    } catch(e) { errors.BYBIT = e.message; }
+  }
+
+  // ── OKX ──────────────────────────────────────────────────────────────────
+  const okxKey  = (env.OKX_KEY || '').trim();
+  const okxSec  = (env.OKX_SECRET || '').trim();
+  const okxPass = (env.OKX_PASSPHRASE || '').trim();
+  if (okxKey && okxSec && okxPass) {
+    try {
+      const ts   = new Date().toISOString();
+      const path = '/api/v5/account/balance?ccy=USDT,USDC';
+      const key2 = await crypto.subtle.importKey('raw', new TextEncoder().encode(okxSec),
+        { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+      const sig  = await crypto.subtle.sign('HMAC', key2, new TextEncoder().encode(ts + 'GET' + path));
+      const b64  = btoa(String.fromCharCode(...new Uint8Array(sig)));
+      const r    = await safeFetch(`https://www.okx.com${path}`, {
+        headers: { 'OK-ACCESS-KEY': okxKey, 'OK-ACCESS-SIGN': b64,
+                   'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': okxPass,
+                   'Content-Type': 'application/json' }
+      });
+      if (r.ok && r.data?.code === '0') {
+        const details = r.data.data?.[0]?.details || [];
+        const usdt    = details.find(d => d.ccy === 'USDT');
+        const usdc    = details.find(d => d.ccy === 'USDC');
+        balances.OKX = {
+          USDT: Math.round(parseFloat(usdt?.availEq || 0) * 100) / 100,
+          USDC: Math.round(parseFloat(usdc?.availEq || 0) * 100) / 100,
+        };
+      } else {
+        errors.OKX = r.data?.msg || `${r.status}`;
+      }
+    } catch(e) { errors.OKX = e.message; }
+  }
+
+  // ── MEXC ─────────────────────────────────────────────────────────────────
+  const mexcKey = (env.MEXC_KEY || '').trim();
+  const mexcSec = (env.MEXC_SECRET || '').trim();
+  if (mexcKey && mexcSec) {
+    try {
+      const ts  = Date.now().toString();
+      const sig = await hmac256(mexcSec, mexcKey + ts);
+      const r   = await safeFetch(
+        'https://contract.mexc.com/api/v1/private/account/assets',
+        { headers: { 'ApiKey': mexcKey, 'Request-Time': ts,
+                     'Signature': sig, 'Content-Type': 'application/json' } }
+      );
+      if (r.ok && r.data?.success) {
+        const assets = r.data.data || [];
+        const usdt   = assets.find(a => a.currency === 'USDT');
+        const usdc   = assets.find(a => a.currency === 'USDC');
+        balances.MEXC = {
+          USDT: Math.round(parseFloat(usdt?.availableBalance || 0) * 100) / 100,
+          USDC: Math.round(parseFloat(usdc?.availableBalance || 0) * 100) / 100,
+        };
+      } else {
+        errors.MEXC = r.data?.message || `${r.status}`;
+      }
+    } catch(e) { errors.MEXC = e.message; }
+  }
+
+  // ── Totals ────────────────────────────────────────────────────────────────
+  let totalUsdt = 0, totalUsdc = 0;
+  for (const b of Object.values(balances)) {
+    totalUsdt += b.USDT || 0;
+    totalUsdc += b.USDC || 0;
+  }
+
+  return {
+    balances,  // per-exchange breakdown
+    totals: {
+      USDT: Math.round(totalUsdt * 100) / 100,
+      USDC: Math.round(totalUsdc * 100) / 100,
+      total: Math.round((totalUsdt + totalUsdc) * 100) / 100,
+    },
+    errors,
+  };
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
 // MAIN SYNC — called by cron and by /sync endpoint
 // ═════════════════════════════════════════════════════════════════════════════
 async function syncAll(env) {
@@ -355,11 +478,18 @@ async function syncAll(env) {
   };
   const totalPnl = positions.reduce((s, p) => s + (p.pnl || 0), 0);
 
+  // Fetch balances in parallel with sync
+  let balanceData = { balances: {}, totals: { USDT: 0, USDC: 0, total: 0 }, errors: {} };
+  try { balanceData = await fetchBalances(env); } catch(e) {}
+
   const payload = {
     positions, orders, errors,
     totalPnl:  Math.round(totalPnl * 100) / 100,
     lastSync:  new Date().toISOString(),
     count: { positions: positions.length, orders: orders.length },
+    balances:  balanceData.balances,
+    liquidity: balanceData.totals,
+    balanceErrors: balanceData.errors,
   };
 
   // Save to KV — only write if data changed (saves KV write quota)
@@ -425,6 +555,25 @@ export default {
         },
         railwayUrl: env.RAILWAY_URL || null
       });
+    }
+
+    // ── /balance — free liquidity per exchange ───────────────────────────────
+    if (url.pathname === '/balance') {
+      // Try KV cache first (balance is part of summary)
+      let cached = null;
+      if (env.MAUEX_CACHE) {
+        const raw = await env.MAUEX_CACHE.get('summary');
+        if (raw) {
+          try {
+            const d = JSON.parse(raw);
+            if (d.liquidity) cached = { balances: d.balances, liquidity: d.liquidity, errors: d.balanceErrors || {} };
+          } catch(e) {}
+        }
+      }
+      if (cached) return json(cached);
+      // No cache — fetch live
+      const data = await fetchBalances(env);
+      return json(data);
     }
 
     // ── /summary, /positions, /orders — read from KV ─────────────────────────
@@ -592,47 +741,56 @@ export default {
       const trades  = [];
       const summary = [];
 
-      // Bybit position history (much cleaner than trade fills)
+      // Bybit position history — max 7 days per request, so we chunk
       const bybitKey = (env.BYBIT_KEY || '').trim();
       const bybitSec = (env.BYBIT_SECRET || '').trim();
       if (bybitKey && bybitSec) {
         try {
-          const ts  = Date.now().toString();
-          const q   = `category=linear&startTime=${startTs}&endTime=${endTs}&limit=100`;
-          const msg = ts + bybitKey + '5000' + q;
-          const sig = await hmac256(bybitSec, msg);
-          const r   = await safeFetch(
-            `https://api.bybit.com/v5/position/closed-pnl?${q}`,
-            { headers: { 'X-BAPI-API-KEY': bybitKey, 'X-BAPI-TIMESTAMP': ts, 'X-BAPI-SIGN': sig, 'X-BAPI-RECV-WINDOW': '5000' } }
-          );
-          if (r.ok && r.data?.retCode === 0) {
-            const list = r.data.result?.list || [];
-            list.forEach(p => {
-              const pnl  = parseFloat(p.closedPnl);
-              const fees = parseFloat(p.cumEntryValue) * 0.00055; // approx
-              trades.push({
-                exchangeSource: 'BYBIT',
-                exchangeId:     `bybit-pos-${p.symbol}-${p.orderId}`,
-                ticker:         p.symbol.replace('USDT',''),
-                dir:            p.side === 'Buy' ? 'long' : 'short',
-                exchange:       'BYBIT',
-                type:           'futures',
-                entry:          parseFloat(p.avgEntryPrice) || 0,
-                closePrice:     parseFloat(p.avgExitPrice)  || 0,
-                pnl:            Math.round(pnl * 100) / 100,
-                fees:           Math.round(fees * 100) / 100,
-                posSize:        parseFloat(p.cumEntryValue) || 0,
-                leverage:       parseInt(p.leverage) || 1,
-                status:         'closed',
-                createdAt:      new Date(parseInt(p.createdTime)).toISOString(),
-                closeDate:      new Date(parseInt(p.updatedTime)).toISOString().split('T')[0],
-                closeNotes:     'Importado de Bybit (position history)',
+          const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+          let bybitTotal = 0;
+          let chunkStart = startTs;
+
+          while (chunkStart < endTs) {
+            const chunkEnd = Math.min(chunkStart + SEVEN_DAYS, endTs);
+            const ts  = Date.now().toString();
+            const q   = `category=linear&startTime=${chunkStart}&endTime=${chunkEnd}&limit=100`;
+            const msg = ts + bybitKey + '5000' + q;
+            const sig = await hmac256(bybitSec, msg);
+            const r   = await safeFetch(
+              `https://api.bybit.com/v5/position/closed-pnl?${q}`,
+              { headers: { 'X-BAPI-API-KEY': bybitKey, 'X-BAPI-TIMESTAMP': ts,
+                           'X-BAPI-SIGN': sig, 'X-BAPI-RECV-WINDOW': '5000' } }
+            );
+            if (r.ok && r.data?.retCode === 0) {
+              const list = r.data.result?.list || [];
+              bybitTotal += list.length;
+              list.forEach(p => {
+                const pnl  = parseFloat(p.closedPnl);
+                const fees = Math.abs(parseFloat(p.cumExecFee || 0));
+                trades.push({
+                  exchangeSource: 'BYBIT',
+                  exchangeId:     `bybit-pos-${p.symbol}-${p.orderId}`,
+                  ticker:         p.symbol.replace('USDT',''),
+                  dir:            p.side === 'Buy' ? 'long' : 'short',
+                  exchange:       'BYBIT',
+                  type:           'futures',
+                  entry:          parseFloat(p.avgEntryPrice) || 0,
+                  closePrice:     parseFloat(p.avgExitPrice)  || 0,
+                  pnl:            Math.round((pnl - fees) * 100) / 100,
+                  pnlRaw:         Math.round(pnl * 100) / 100,
+                  fees:           Math.round(fees * 100) / 100,
+                  posSize:        parseFloat(p.cumEntryValue) || 0,
+                  leverage:       parseInt(p.leverage) || 1,
+                  status:         'closed',
+                  createdAt:      new Date(parseInt(p.createdTime)).toISOString(),
+                  closeDate:      new Date(parseInt(p.updatedTime)).toISOString().split('T')[0],
+                  closeNotes:     'Importado de Bybit (position history)',
+                });
               });
-            });
-            summary.push(`✅ BYBIT: ${list.length} posiciones`);
-          } else {
-            summary.push(`⚠️ BYBIT: ${r.data?.retMsg || 'sin datos'}`);
+            }
+            chunkStart = chunkEnd + 1;
           }
+          summary.push(`✅ BYBIT: ${bybitTotal} posiciones`);
         } catch(e) { summary.push(`❌ BYBIT: ${e.message}`); }
       }
 
