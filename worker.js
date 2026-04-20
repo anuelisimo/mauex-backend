@@ -356,22 +356,37 @@ async function fetchBalances(env) {
   const bybitSec = (env.BYBIT_SECRET || '').trim();
   if (bybitKey && bybitSec) {
     try {
-      const ts  = Date.now().toString();
-      const q   = 'accountType=UNIFIED';
-      const msg = ts + bybitKey + '5000' + q;
-      const sig = await hmac256(bybitSec, msg);
-      const r   = await safeFetch(
-        `https://api.bybit.com/v5/account/wallet-balance?${q}`,
-        { headers: { 'X-BAPI-API-KEY': bybitKey, 'X-BAPI-TIMESTAMP': ts,
-                     'X-BAPI-SIGN': sig, 'X-BAPI-RECV-WINDOW': '5000' } }
-      );
+      const bybitBalance = async (accountType) => {
+        const ts  = Date.now().toString();
+        const q   = `accountType=${accountType}`;
+        const msg = ts + bybitKey + '5000' + q;
+        const sig = await hmac256(bybitSec, msg);
+        return safeFetch(
+          `https://api.bybit.com/v5/account/wallet-balance?${q}`,
+          { headers: { 'X-BAPI-API-KEY': bybitKey, 'X-BAPI-TIMESTAMP': ts,
+                       'X-BAPI-SIGN': sig, 'X-BAPI-RECV-WINDOW': '5000' } }
+        );
+      };
+
+      // Try UNIFIED first, fall back to CONTRACT
+      let r = await bybitBalance('UNIFIED');
+      if (!r.ok || r.data?.retCode !== 0) {
+        r = await bybitBalance('CONTRACT');
+      }
+
       if (r.ok && r.data?.retCode === 0) {
-        const coins = r.data.result?.list?.[0]?.coin || [];
-        const usdt  = coins.find(c => c.coin === 'USDT');
-        const usdc  = coins.find(c => c.coin === 'USDC');
+        // Sum across all accounts returned
+        let totalUsdt = 0, totalUsdc = 0;
+        for (const account of (r.data.result?.list || [])) {
+          const coins = account.coin || [];
+          const usdt  = coins.find(c => c.coin === 'USDT');
+          const usdc  = coins.find(c => c.coin === 'USDC');
+          totalUsdt += parseFloat(usdt?.availableToWithdraw || usdt?.walletBalance || 0);
+          totalUsdc += parseFloat(usdc?.availableToWithdraw || usdc?.walletBalance || 0);
+        }
         balances.BYBIT = {
-          USDT: Math.round(parseFloat(usdt?.availableToWithdraw || 0) * 100) / 100,
-          USDC: Math.round(parseFloat(usdc?.availableToWithdraw || 0) * 100) / 100,
+          USDT: Math.round(totalUsdt * 100) / 100,
+          USDC: Math.round(totalUsdc * 100) / 100,
         };
       } else {
         errors.BYBIT = r.data?.retMsg || `${r.status}`;
@@ -385,28 +400,44 @@ async function fetchBalances(env) {
   const okxPass = (env.OKX_PASSPHRASE || '').trim();
   if (okxKey && okxSec && okxPass) {
     try {
-      const ts   = new Date().toISOString();
-      const path = '/api/v5/account/balance?ccy=USDT,USDC';
-      const key2 = await crypto.subtle.importKey('raw', new TextEncoder().encode(okxSec),
-        { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-      const sig  = await crypto.subtle.sign('HMAC', key2, new TextEncoder().encode(ts + 'GET' + path));
-      const b64  = btoa(String.fromCharCode(...new Uint8Array(sig)));
-      const r    = await safeFetch(`https://www.okx.com${path}`, {
-        headers: { 'OK-ACCESS-KEY': okxKey, 'OK-ACCESS-SIGN': b64,
-                   'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': okxPass,
-                   'Content-Type': 'application/json' }
-      });
-      if (r.ok && r.data?.code === '0') {
-        const details = r.data.data?.[0]?.details || [];
-        const usdt    = details.find(d => d.ccy === 'USDT');
-        const usdc    = details.find(d => d.ccy === 'USDC');
-        balances.OKX = {
-          USDT: Math.round(parseFloat(usdt?.availEq || 0) * 100) / 100,
-          USDC: Math.round(parseFloat(usdc?.availEq || 0) * 100) / 100,
-        };
-      } else {
-        errors.OKX = r.data?.msg || `${r.status}`;
+      const okxGet = async (path) => {
+        const ts   = new Date().toISOString();
+        const key2 = await crypto.subtle.importKey('raw', new TextEncoder().encode(okxSec),
+          { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+        const sig  = await crypto.subtle.sign('HMAC', key2, new TextEncoder().encode(ts + 'GET' + path));
+        const b64  = btoa(String.fromCharCode(...new Uint8Array(sig)));
+        return safeFetch(`https://www.okx.com${path}`, {
+          headers: { 'OK-ACCESS-KEY': okxKey, 'OK-ACCESS-SIGN': b64,
+                     'OK-ACCESS-TIMESTAMP': ts, 'OK-ACCESS-PASSPHRASE': okxPass,
+                     'Content-Type': 'application/json' }
+        });
+      };
+
+      let usdtTotal = 0, usdcTotal = 0;
+
+      // Trading account (futures/swaps)
+      const r1 = await okxGet('/api/v5/account/balance?ccy=USDT,USDC');
+      if (r1.ok && r1.data?.code === '0') {
+        const details = r1.data.data?.[0]?.details || [];
+        usdtTotal += parseFloat(details.find(d=>d.ccy==='USDT')?.availEq || 0);
+        usdcTotal += parseFloat(details.find(d=>d.ccy==='USDC')?.availEq || 0);
       }
+
+      // Funding account
+      const r2 = await okxGet('/api/v5/asset/balances?ccy=USDT,USDC');
+      if (r2.ok && r2.data?.code === '0') {
+        for (const b of (r2.data.data || [])) {
+          if (b.ccy === 'USDT') usdtTotal += parseFloat(b.availBal || 0);
+          if (b.ccy === 'USDC') usdcTotal += parseFloat(b.availBal || 0);
+        }
+      }
+
+      balances.OKX = {
+        USDT: Math.round(usdtTotal * 100) / 100,
+        USDC: Math.round(usdcTotal * 100) / 100,
+      };
+
+      if (!r1.ok && !r2.ok) errors.OKX = r1.data?.msg || `${r1.status}`;
     } catch(e) { errors.OKX = e.message; }
   }
 
@@ -415,24 +446,43 @@ async function fetchBalances(env) {
   const mexcSec = (env.MEXC_SECRET || '').trim();
   if (mexcKey && mexcSec) {
     try {
-      const ts  = Date.now().toString();
-      const sig = await hmac256(mexcSec, mexcKey + ts);
-      const r   = await safeFetch(
+      let usdtTotal = 0, usdcTotal = 0;
+
+      // Futures account
+      const ts1  = Date.now().toString();
+      const sig1 = await hmac256(mexcSec, mexcKey + ts1);
+      const r1   = await safeFetch(
         'https://contract.mexc.com/api/v1/private/account/assets',
-        { headers: { 'ApiKey': mexcKey, 'Request-Time': ts,
-                     'Signature': sig, 'Content-Type': 'application/json' } }
+        { headers: { 'ApiKey': mexcKey, 'Request-Time': ts1,
+                     'Signature': sig1, 'Content-Type': 'application/json' } }
       );
-      if (r.ok && r.data?.success) {
-        const assets = r.data.data || [];
-        const usdt   = assets.find(a => a.currency === 'USDT');
-        const usdc   = assets.find(a => a.currency === 'USDC');
-        balances.MEXC = {
-          USDT: Math.round(parseFloat(usdt?.availableBalance || 0) * 100) / 100,
-          USDC: Math.round(parseFloat(usdc?.availableBalance || 0) * 100) / 100,
-        };
-      } else {
-        errors.MEXC = r.data?.message || `${r.status}`;
+      if (r1.ok && r1.data?.success) {
+        const assets = r1.data.data || [];
+        usdtTotal += parseFloat(assets.find(a=>a.currency==='USDT')?.availableBalance || 0);
+        usdcTotal += parseFloat(assets.find(a=>a.currency==='USDC')?.availableBalance || 0);
       }
+
+      // Spot account
+      const ts2  = Date.now().toString();
+      const q2   = `timestamp=${ts2}`;
+      const sig2 = await hmac256(mexcSec, q2);
+      const r2   = await safeFetch(
+        `https://api.mexc.com/api/v3/account?${q2}&signature=${sig2}`,
+        { headers: { 'X-MEXC-APIKEY': mexcKey } }
+      );
+      if (r2.ok && r2.data?.balances) {
+        for (const b of r2.data.balances) {
+          if (b.asset === 'USDT') usdtTotal += parseFloat(b.free || 0);
+          if (b.asset === 'USDC') usdcTotal += parseFloat(b.free || 0);
+        }
+      }
+
+      balances.MEXC = {
+        USDT: Math.round(usdtTotal * 100) / 100,
+        USDC: Math.round(usdcTotal * 100) / 100,
+      };
+
+      if (!r1.ok && !r2.ok) errors.MEXC = r1.data?.message || `${r1.status}`;
     } catch(e) { errors.MEXC = e.message; }
   }
 
@@ -476,7 +526,8 @@ async function syncAll(env) {
     okx:     okx.error,
     mexc:    mexc.error,
   };
-  const totalPnl = positions.reduce((s, p) => s + (p.pnl || 0), 0);
+  const totalPnl    = positions.reduce((s, p) => s + (p.pnl || 0), 0);
+  const totalMargin = positions.reduce((s, p) => s + (p.margin || 0), 0);
 
   // Fetch balances in parallel with sync
   let balanceData = { balances: {}, totals: { USDT: 0, USDC: 0, total: 0 }, errors: {} };
@@ -484,11 +535,12 @@ async function syncAll(env) {
 
   const payload = {
     positions, orders, errors,
-    totalPnl:  Math.round(totalPnl * 100) / 100,
-    lastSync:  new Date().toISOString(),
+    totalPnl:     Math.round(totalPnl * 100) / 100,
+    marginInUse:  Math.round(totalMargin * 100) / 100,
+    lastSync:     new Date().toISOString(),
     count: { positions: positions.length, orders: orders.length },
-    balances:  balanceData.balances,
-    liquidity: balanceData.totals,
+    balances:     balanceData.balances,
+    liquidity:    balanceData.totals,
     balanceErrors: balanceData.errors,
   };
 
