@@ -647,12 +647,40 @@ app.get('/binance-balance', async (req, res) => {
     );
     if (!r.ok || !r.data) return res.json({ error: `${r.status} ${r.raw||''}` });
     const d = r.data;
+
+    // Sum across all assets (multi-asset mode: USDT + USDC separate)
+    const assets = d.assets || [];
+    let total = 0, wallet = 0, free = 0, margin = 0, pnl = 0;
+
+    if (assets.length > 0) {
+      for (const a of assets) {
+        const wb = parseFloat(a.walletBalance      || 0);
+        const mb = parseFloat(a.marginBalance      || 0);
+        const ab = parseFloat(a.availableBalance   || 0);
+        const im = parseFloat(a.initialMargin      || 0) + parseFloat(a.openOrderInitialMargin || 0);
+        const up = parseFloat(a.unrealizedProfit   || 0);
+        if (wb === 0 && mb === 0) continue; // skip empty assets
+        wallet += wb;
+        total  += mb;
+        free   += ab;
+        margin += im;
+        pnl    += up;
+      }
+    } else {
+      // Single-asset fallback
+      total  = parseFloat(d.totalMarginBalance    || 0);
+      wallet = parseFloat(d.totalWalletBalance    || 0);
+      free   = parseFloat(d.availableBalance      || 0);
+      margin = parseFloat(d.totalInitialMargin    || 0);
+      pnl    = parseFloat(d.totalUnrealizedProfit || 0);
+    }
+
     res.json({
-      total:  Math.round(parseFloat(d.totalMarginBalance   || 0) * 100) / 100,
-      wallet: Math.round(parseFloat(d.totalWalletBalance   || 0) * 100) / 100,
-      free:   Math.round(parseFloat(d.availableBalance     || 0) * 100) / 100,
-      margin: Math.round(parseFloat(d.totalInitialMargin   || 0) * 100) / 100,
-      pnl:    Math.round(parseFloat(d.totalUnrealizedProfit|| 0) * 100) / 100,
+      total:  Math.round(total  * 100) / 100,
+      wallet: Math.round(wallet * 100) / 100,
+      free:   Math.round(free   * 100) / 100,
+      margin: Math.round(margin * 100) / 100,
+      pnl:    Math.round(pnl    * 100) / 100,
     });
   } catch(e) { res.json({ error: e.message }); }
 });
