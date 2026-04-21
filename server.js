@@ -638,46 +638,63 @@ app.get('/binance-balance', async (req, res) => {
   const sec = (process.env.BINANCE_SECRET || '').trim();
   if (!key || !sec) return res.json({ balances: {}, error: 'No keys' });
 
-  const debug = {};
-
   try {
-    // ── Futures account: /fapi/v2/account — most detailed ────────────────────
-    const ts1 = Date.now();
-    const q1  = `timestamp=${ts1}`;
-    const r1  = await safeFetch(
-      `https://fapi.binance.com/fapi/v2/account?${q1}&signature=${hmac256(sec,q1)}`,
+    // /fapi/v2/account — gives total wallet + margin breakdown
+    const ts  = Date.now();
+    const q   = `timestamp=${ts}`;
+    const r   = await safeFetch(
+      `https://fapi.binance.com/fapi/v2/account?${q}&signature=${hmac256(sec,q)}`,
       { headers: { 'X-MBX-APIKEY': key } }
     );
-    debug.account = { ok: r1.ok, status: r1.status, raw: r1.raw||null, data: r1.data };
 
-    // ── Futures balance: /fapi/v2/balance — per asset ─────────────────────────
-    const ts2 = Date.now();
-    const q2  = `timestamp=${ts2}`;
-    const r2  = await safeFetch(
-      `https://fapi.binance.com/fapi/v2/balance?${q2}&signature=${hmac256(sec,q2)}`,
-      { headers: { 'X-MBX-APIKEY': key } }
-    );
-    debug.balance = { ok: r2.ok, status: r2.status, isArray: Array.isArray(r2.data), data: r2.data };
+    if (!r.ok || !r.data) {
+      return res.json({ balances: {}, error: `${r.status} ${r.raw||''}` });
+    }
 
-    let usdtFutures = 0, usdcFutures = 0;
-    if (r2.ok && Array.isArray(r2.data)) {
-      const usdt = r2.data.find(b => b.asset === 'USDT');
-      const usdc = r2.data.find(b => b.asset === 'USDC');
-      debug.usdtEntry = usdt;
-      debug.usdcEntry = usdc;
-      usdtFutures = parseFloat(usdt?.balance || usdt?.walletBalance || 0);
-      usdcFutures = parseFloat(usdc?.balance || usdc?.walletBalance || 0);
+    const d = r.data;
+
+    // Per-asset breakdown (USDT + USDC)
+    const assets = d.assets || [];
+    let usdtWallet = 0, usdcWallet = 0;
+    let usdtMargin = 0, usdcMargin = 0;
+    let usdtFree   = 0, usdcFree   = 0;
+
+    for (const a of assets) {
+      if (a.asset === 'USDT') {
+        usdtWallet = parseFloat(a.walletBalance || 0);
+        usdtMargin = parseFloat(a.initialMargin || 0) + parseFloat(a.openOrderInitialMargin || 0);
+        usdtFree   = parseFloat(a.availableBalance || 0);
+      }
+      if (a.asset === 'USDC') {
+        usdcWallet = parseFloat(a.walletBalance || 0);
+        usdcMargin = parseFloat(a.initialMargin || 0) + parseFloat(a.openOrderInitialMargin || 0);
+        usdcFree   = parseFloat(a.availableBalance || 0);
+      }
+    }
+
+    // If per-asset didn't find data, fall back to account-level totals (single-asset accounts)
+    if (usdtWallet === 0 && usdcWallet === 0) {
+      usdtWallet = parseFloat(d.totalWalletBalance || 0);
+      usdtMargin = parseFloat(d.totalInitialMargin || 0);
+      usdtFree   = parseFloat(d.availableBalance   || 0);
     }
 
     res.json({
       balances: {
-        USDT: Math.round(usdtFutures * 100) / 100,
-        USDC: Math.round(usdcFutures * 100) / 100,
+        USDT: Math.round(usdtWallet * 100) / 100,
+        USDC: Math.round(usdcWallet * 100) / 100,
       },
-      debug,
+      margin: {
+        USDT: Math.round(usdtMargin * 100) / 100,
+        USDC: Math.round(usdcMargin * 100) / 100,
+      },
+      free: {
+        USDT: Math.round(usdtFree * 100) / 100,
+        USDC: Math.round(usdcFree * 100) / 100,
+      },
     });
   } catch(e) {
-    res.json({ balances: {}, error: e.message, debug });
+    res.json({ balances: {}, error: e.message });
   }
 });
 
