@@ -654,12 +654,12 @@ app.get('/binance-balance', async (req, res) => {
 
     if (assets.length > 0) {
       for (const a of assets) {
-        const wb = parseFloat(a.walletBalance      || 0);
-        const mb = parseFloat(a.marginBalance      || 0);
-        const ab = parseFloat(a.availableBalance   || 0);
-        const im = parseFloat(a.initialMargin      || 0) + parseFloat(a.openOrderInitialMargin || 0);
-        const up = parseFloat(a.unrealizedProfit   || 0);
-        if (wb === 0 && mb === 0) continue; // skip empty assets
+        const wb = parseFloat(a.walletBalance            || 0);
+        const mb = parseFloat(a.marginBalance            || 0);
+        const ab = parseFloat(a.availableBalance         || 0);
+        const im = parseFloat(a.positionInitialMargin    || 0); // only positions, not orders
+        const up = parseFloat(a.unrealizedProfit         || 0);
+        if (wb === 0 && mb === 0) continue;
         wallet += wb;
         total  += mb;
         free   += ab;
