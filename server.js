@@ -638,52 +638,46 @@ app.get('/binance-balance', async (req, res) => {
   const sec = (process.env.BINANCE_SECRET || '').trim();
   if (!key || !sec) return res.json({ balances: {}, error: 'No keys' });
 
-  let usdtTotal = 0, usdcTotal = 0;
-  const errors = [];
+  const debug = {};
 
   try {
-    // ── Futures: /fapi/v2/balance — walletBalance = total incl. margin ──────
+    // ── Futures account: /fapi/v2/account — most detailed ────────────────────
     const ts1 = Date.now();
     const q1  = `timestamp=${ts1}`;
     const r1  = await safeFetch(
-      `https://fapi.binance.com/fapi/v2/balance?${q1}&signature=${hmac256(sec,q1)}`,
+      `https://fapi.binance.com/fapi/v2/account?${q1}&signature=${hmac256(sec,q1)}`,
       { headers: { 'X-MBX-APIKEY': key } }
     );
-    if (r1.ok && Array.isArray(r1.data)) {
-      for (const b of r1.data) {
-        if (b.asset === 'USDT') usdtTotal += parseFloat(b.walletBalance || 0);
-        if (b.asset === 'USDC') usdcTotal += parseFloat(b.walletBalance || 0);
-      }
-    } else {
-      errors.push(`futures: ${r1.status} ${r1.raw||''}`);
-    }
+    debug.account = { ok: r1.ok, status: r1.status, raw: r1.raw||null, data: r1.data };
 
-    // ── Spot: /api/v3/account — free + locked ────────────────────────────────
+    // ── Futures balance: /fapi/v2/balance — per asset ─────────────────────────
     const ts2 = Date.now();
-    const q2  = `timestamp=${ts2}&omitZeroBalances=true`;
+    const q2  = `timestamp=${ts2}`;
     const r2  = await safeFetch(
-      `https://api.binance.com/api/v3/account?${q2}&signature=${hmac256(sec,q2)}`,
+      `https://fapi.binance.com/fapi/v2/balance?${q2}&signature=${hmac256(sec,q2)}`,
       { headers: { 'X-MBX-APIKEY': key } }
     );
-    if (r2.ok && r2.data?.balances) {
-      for (const b of r2.data.balances) {
-        // free + locked = total in spot
-        if (b.asset === 'USDT') usdtTotal += parseFloat(b.free||0) + parseFloat(b.locked||0);
-        if (b.asset === 'USDC') usdcTotal += parseFloat(b.free||0) + parseFloat(b.locked||0);
-      }
-    } else {
-      errors.push(`spot: ${r2.status} ${r2.raw||''}`);
+    debug.balance = { ok: r2.ok, status: r2.status, isArray: Array.isArray(r2.data), data: r2.data };
+
+    let usdtFutures = 0, usdcFutures = 0;
+    if (r2.ok && Array.isArray(r2.data)) {
+      const usdt = r2.data.find(b => b.asset === 'USDT');
+      const usdc = r2.data.find(b => b.asset === 'USDC');
+      debug.usdtEntry = usdt;
+      debug.usdcEntry = usdc;
+      usdtFutures = parseFloat(usdt?.balance || usdt?.walletBalance || 0);
+      usdcFutures = parseFloat(usdc?.balance || usdc?.walletBalance || 0);
     }
 
     res.json({
       balances: {
-        USDT: Math.round(usdtTotal * 100) / 100,
-        USDC: Math.round(usdcTotal * 100) / 100,
+        USDT: Math.round(usdtFutures * 100) / 100,
+        USDC: Math.round(usdcFutures * 100) / 100,
       },
-      errors: errors.length ? errors : undefined,
+      debug,
     });
   } catch(e) {
-    res.json({ balances: {}, error: e.message });
+    res.json({ balances: {}, error: e.message, debug });
   }
 });
 
