@@ -681,6 +681,14 @@ app.get('/binance-balance', async (req, res) => {
       free:   Math.round(free   * 100) / 100,
       margin: Math.round(margin * 100) / 100,
       pnl:    Math.round(pnl    * 100) / 100,
+      _assets: assets.filter(a => parseFloat(a.walletBalance||0) > 0).map(a => ({
+        asset: a.asset,
+        walletBalance: a.walletBalance,
+        availableBalance: a.availableBalance,
+        marginBalance: a.marginBalance,
+        positionInitialMargin: a.positionInitialMargin,
+        unrealizedProfit: a.unrealizedProfit,
+      })),
     });
   } catch(e) { res.json({ error: e.message }); }
 });
