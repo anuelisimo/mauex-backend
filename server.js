@@ -650,20 +650,22 @@ app.get('/binance-balance', async (req, res) => {
 
     // Sum across all assets (multi-asset mode: USDT + USDC separate)
     const assets = d.assets || [];
-    let total = 0, wallet = 0, free = 0, margin = 0, pnl = 0;
+    let total = 0, wallet = 0, free = 0, margin = 0, orders = 0, pnl = 0;
 
     if (assets.length > 0) {
       for (const a of assets) {
-        const wb = parseFloat(a.walletBalance         || 0);
-        const mb = parseFloat(a.marginBalance         || 0);
-        const ab = parseFloat(a.availableBalance      || 0);
-        const im = parseFloat(a.positionInitialMargin || 0);
-        const up = parseFloat(a.unrealizedProfit      || 0);
+        const wb = parseFloat(a.walletBalance            || 0);
+        const ab = parseFloat(a.availableBalance         || 0);
+        const im = parseFloat(a.positionInitialMargin    || 0);
+        const oo = parseFloat(a.openOrderInitialMargin   || 0);
+        const up = parseFloat(a.unrealizedProfit         || 0);
+        const mb = parseFloat(a.marginBalance            || 0);
         if (wb === 0 && mb === 0) continue;
         wallet += wb;
         total  += mb;
-        free   += ab;  // availableBalance per asset (USDT free + USDC free)
-        margin += im;  // positionInitialMargin per asset
+        free   += ab;
+        margin += im;
+        orders += oo;
         pnl    += up;
       }
     } else {
@@ -680,15 +682,8 @@ app.get('/binance-balance', async (req, res) => {
       wallet: Math.round(wallet * 100) / 100,
       free:   Math.round(free   * 100) / 100,
       margin: Math.round(margin * 100) / 100,
+      orders: Math.round(orders * 100) / 100,
       pnl:    Math.round(pnl    * 100) / 100,
-      _assets: assets.filter(a => parseFloat(a.walletBalance||0) > 0).map(a => ({
-        asset: a.asset,
-        walletBalance: a.walletBalance,
-        availableBalance: a.availableBalance,
-        marginBalance: a.marginBalance,
-        positionInitialMargin: a.positionInitialMargin,
-        unrealizedProfit: a.unrealizedProfit,
-      })),
     });
   } catch(e) { res.json({ error: e.message }); }
 });
