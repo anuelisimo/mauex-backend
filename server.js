@@ -636,66 +636,25 @@ app.get('/myip', async (req, res) => {
 app.get('/binance-balance', async (req, res) => {
   const key = (process.env.BINANCE_KEY    || '').trim();
   const sec = (process.env.BINANCE_SECRET || '').trim();
-  if (!key || !sec) return res.json({ balances: {}, error: 'No keys' });
+  if (!key || !sec) return res.json({ error: 'No keys' });
 
   try {
-    // /fapi/v2/account — gives total wallet + margin breakdown
-    const ts  = Date.now();
-    const q   = `timestamp=${ts}`;
-    const r   = await safeFetch(
+    const ts = Date.now();
+    const q  = `timestamp=${ts}`;
+    const r  = await safeFetch(
       `https://fapi.binance.com/fapi/v2/account?${q}&signature=${hmac256(sec,q)}`,
       { headers: { 'X-MBX-APIKEY': key } }
     );
-
-    if (!r.ok || !r.data) {
-      return res.json({ balances: {}, error: `${r.status} ${r.raw||''}` });
-    }
-
+    if (!r.ok || !r.data) return res.json({ error: `${r.status} ${r.raw||''}` });
     const d = r.data;
-
-    // Per-asset breakdown (USDT + USDC)
-    const assets = d.assets || [];
-    let usdtWallet = 0, usdcWallet = 0;
-    let usdtMargin = 0, usdcMargin = 0;
-    let usdtFree   = 0, usdcFree   = 0;
-
-    for (const a of assets) {
-      if (a.asset === 'USDT') {
-        usdtWallet = parseFloat(a.walletBalance || 0);
-        usdtMargin = parseFloat(a.initialMargin || 0) + parseFloat(a.openOrderInitialMargin || 0);
-        usdtFree   = parseFloat(a.availableBalance || 0);
-      }
-      if (a.asset === 'USDC') {
-        usdcWallet = parseFloat(a.walletBalance || 0);
-        usdcMargin = parseFloat(a.initialMargin || 0) + parseFloat(a.openOrderInitialMargin || 0);
-        usdcFree   = parseFloat(a.availableBalance || 0);
-      }
-    }
-
-    // If per-asset didn't find data, fall back to account-level totals (single-asset accounts)
-    if (usdtWallet === 0 && usdcWallet === 0) {
-      usdtWallet = parseFloat(d.totalWalletBalance || 0);
-      usdtMargin = parseFloat(d.totalInitialMargin || 0);
-      usdtFree   = parseFloat(d.availableBalance   || 0);
-    }
-
     res.json({
-      balances: {
-        USDT: Math.round(usdtWallet * 100) / 100,
-        USDC: Math.round(usdcWallet * 100) / 100,
-      },
-      margin: {
-        USDT: Math.round(usdtMargin * 100) / 100,
-        USDC: Math.round(usdcMargin * 100) / 100,
-      },
-      free: {
-        USDT: Math.round(usdtFree * 100) / 100,
-        USDC: Math.round(usdcFree * 100) / 100,
-      },
+      total:  Math.round(parseFloat(d.totalMarginBalance   || 0) * 100) / 100,
+      wallet: Math.round(parseFloat(d.totalWalletBalance   || 0) * 100) / 100,
+      free:   Math.round(parseFloat(d.availableBalance     || 0) * 100) / 100,
+      margin: Math.round(parseFloat(d.totalInitialMargin   || 0) * 100) / 100,
+      pnl:    Math.round(parseFloat(d.totalUnrealizedProfit|| 0) * 100) / 100,
     });
-  } catch(e) {
-    res.json({ balances: {}, error: e.message });
-  }
+  } catch(e) { res.json({ error: e.message }); }
 });
 
 app.get('/binance-positions', (req, res) => res.json({
