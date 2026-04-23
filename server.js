@@ -850,7 +850,70 @@ app.get('/binance-position-history', async (req, res) => {
   }
 });
 
+app.get('/bybit-balance', async (req, res) => {
+  const key = (process.env.BYBIT_KEY    || '').trim();
+  const sec = (process.env.BYBIT_SECRET || '').trim();
+  if (!key || !sec) return res.json({ error: 'No Bybit keys' });
+
+  const bybitReq = async (accountType) => {
+    const ts  = Date.now().toString();
+    const q   = `accountType=${accountType}`;
+    const msg = ts + key + '5000' + q;
+    const sig = crypto.createHmac('sha256', sec).update(msg).digest('hex');
+    return safeFetch(`https://api.bybit.com/v5/account/wallet-balance?${q}`, {
+      headers: { 'X-BAPI-API-KEY': key, 'X-BAPI-TIMESTAMP': ts,
+                 'X-BAPI-SIGN': sig, 'X-BAPI-RECV-WINDOW': '5000' }
+    });
+  };
+
+  try {
+    let r = await bybitReq('UNIFIED');
+    if (!r.ok || r.data?.retCode !== 0) r = await bybitReq('CONTRACT');
+
+    if (!r.ok || !r.data) return res.json({ error: `${r.status} ${r.raw||''}` });
+    if (r.data.retCode !== 0) return res.json({ error: r.data.retMsg });
+
+    const acct     = r.data.result?.list?.[0] || {};
+    const totalEq  = parseFloat(acct.totalEquity || 0);
+    const freeBal  = parseFloat(acct.totalAvailableBalance || 0);
+    const totalMgn = parseFloat(acct.totalInitialMargin    || 0);
+    const upnl     = parseFloat(acct.totalPerpUPL          || 0);
+
+    // CONTRACT accounts return empty strings — derive from coins
+    if (freeBal === 0 && totalMgn === 0) {
+      let wallet = 0, margin = 0, orders = 0, pnl = 0;
+      for (const c of (acct.coin || [])) {
+        if (c.coin === 'USDT' || c.coin === 'USDC') {
+          wallet += parseFloat(c.walletBalance   || 0);
+          margin += parseFloat(c.totalPositionIM || 0);
+          orders += parseFloat(c.totalOrderIM    || 0);
+          pnl    += parseFloat(c.unrealisedPnl   || 0);
+        }
+      }
+      return res.json({
+        total:  Math.round(totalEq * 100) / 100,
+        free:   Math.round((wallet - margin - orders) * 100) / 100,
+        margin: Math.round(margin * 100) / 100,
+        orders: Math.round(orders * 100) / 100,
+        pnl:    Math.round(pnl    * 100) / 100,
+      });
+    }
+
+    const ordersMgn = parseFloat(acct.totalOrderIM || 0);
+    res.json({
+      total:  Math.round(totalEq                   * 100) / 100,
+      free:   Math.round(freeBal                   * 100) / 100,
+      margin: Math.round((totalMgn - ordersMgn)    * 100) / 100,
+      orders: Math.round(ordersMgn                 * 100) / 100,
+      pnl:    Math.round(upnl                      * 100) / 100,
+    });
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 MAUex Binance server on port ${PORT}`);
   console.log(`   Key: ${process.env.BINANCE_KEY ? '✅' : '❌ not set'}`);
+  console.log(`   Bybit: ${process.env.BYBIT_KEY ? '✅' : '❌ not set'}`);
 });
