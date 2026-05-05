@@ -334,6 +334,27 @@ async function syncMEXC(env) {
 // ═════════════════════════════════════════════════════════════════════════════
 // BALANCES — free USDT/USDC not locked in positions or orders
 // ═════════════════════════════════════════════════════════════════════════════
+function normalizeBalance(raw = {}) {
+  const usdt = Number(raw.USDT ?? raw.usdt ?? 0) || 0;
+  const usdc = Number(raw.USDC ?? raw.usdc ?? 0) || 0;
+  const fallbackTotal = usdt + usdc;
+  const total = Number(raw.total ?? raw.totalEquity ?? raw.wallet ?? fallbackTotal) || 0;
+  const free = Number(raw.free ?? raw.available ?? raw.availableBalance ?? (fallbackTotal || total)) || 0;
+  const margin = Number(raw.margin ?? raw.marginUsed ?? 0) || 0;
+  const orders = Number(raw.orders ?? raw.orderMargin ?? 0) || 0;
+  const pnl = Number(raw.pnl ?? raw.unrealizedPnl ?? raw.upnl ?? 0) || 0;
+
+  return {
+    total: Math.round(total * 100) / 100,
+    free: Math.round(free * 100) / 100,
+    margin: Math.round(margin * 100) / 100,
+    orders: Math.round(orders * 100) / 100,
+    pnl: Math.round(pnl * 100) / 100,
+    USDT: Math.round(usdt * 100) / 100,
+    USDC: Math.round(usdc * 100) / 100,
+  };
+}
+
 async function fetchBalances(env) {
   const balances = {};
   const errors   = {};
@@ -343,18 +364,30 @@ async function fetchBalances(env) {
   if (railwayUrl) {
     try {
       const r = await safeFetch(`${railwayUrl}/binance-balance`);
-      if (r.ok && r.data?.balances) {
-        balances.BINANCE = r.data.balances; // { USDT: 1234.56, USDC: 0 }
+      if (r.ok && r.data && !r.data.error) {
+        balances.BINANCE = normalizeBalance(r.data);
       } else {
         errors.BINANCE = r.data?.error || `${r.status}`;
       }
     } catch(e) { errors.BINANCE = e.message; }
   }
 
-  // ── Bybit ────────────────────────────────────────────────────────────────
+  // ── Bybit via Railway, if available ─────────────────────────────────────
+  if (railwayUrl) {
+    try {
+      const r = await safeFetch(`${railwayUrl}/bybit-balance`);
+      if (r.ok && r.data && !r.data.error) {
+        balances.BYBIT = normalizeBalance(r.data);
+      } else if (r.data?.error || r.status) {
+        errors.BYBIT = r.data?.error || `${r.status}`;
+      }
+    } catch(e) { errors.BYBIT = e.message; }
+  }
+
+  // ── Bybit direct fallback ────────────────────────────────────────────────
   const bybitKey = (env.BYBIT_KEY || '').trim();
   const bybitSec = (env.BYBIT_SECRET || '').trim();
-  if (bybitKey && bybitSec) {
+  if (!balances.BYBIT && bybitKey && bybitSec) {
     try {
       const bybitBalance = async (accountType) => {
         const ts  = Date.now().toString();
@@ -384,10 +417,15 @@ async function fetchBalances(env) {
           totalUsdt += parseFloat(usdt?.availableToWithdraw || usdt?.walletBalance || 0);
           totalUsdc += parseFloat(usdc?.availableToWithdraw || usdc?.walletBalance || 0);
         }
-        balances.BYBIT = {
-          USDT: Math.round(totalUsdt * 100) / 100,
-          USDC: Math.round(totalUsdc * 100) / 100,
-        };
+        balances.BYBIT = normalizeBalance({
+          total: totalUsdt + totalUsdc,
+          free: totalUsdt + totalUsdc,
+          margin: 0,
+          orders: 0,
+          pnl: 0,
+          USDT: totalUsdt,
+          USDC: totalUsdc,
+        });
       } else {
         errors.BYBIT = r.data?.retMsg || `${r.status}`;
       }
@@ -432,10 +470,15 @@ async function fetchBalances(env) {
         }
       }
 
-      balances.OKX = {
-        USDT: Math.round(usdtTotal * 100) / 100,
-        USDC: Math.round(usdcTotal * 100) / 100,
-      };
+      balances.OKX = normalizeBalance({
+        total: usdtTotal + usdcTotal,
+        free: usdtTotal + usdcTotal,
+        margin: 0,
+        orders: 0,
+        pnl: 0,
+        USDT: usdtTotal,
+        USDC: usdcTotal,
+      });
 
       if (!r1.ok && !r2.ok) errors.OKX = r1.data?.msg || `${r1.status}`;
     } catch(e) { errors.OKX = e.message; }
@@ -477,10 +520,15 @@ async function fetchBalances(env) {
         }
       }
 
-      balances.MEXC = {
-        USDT: Math.round(usdtTotal * 100) / 100,
-        USDC: Math.round(usdcTotal * 100) / 100,
-      };
+      balances.MEXC = normalizeBalance({
+        total: usdtTotal + usdcTotal,
+        free: usdtTotal + usdcTotal,
+        margin: 0,
+        orders: 0,
+        pnl: 0,
+        USDT: usdtTotal,
+        USDC: usdcTotal,
+      });
 
       if (!r1.ok && !r2.ok) errors.MEXC = r1.data?.message || `${r1.status}`;
     } catch(e) { errors.MEXC = e.message; }
@@ -508,37 +556,17 @@ async function fetchBalances(env) {
 // MAIN SYNC — called by cron and by /sync endpoint
 // ═════════════════════════════════════════════════════════════════════════════
 async function syncAll(env) {
-  const [bnb, bybit, okx, mexc] = await Promise.all([
-    syncBinance(env), syncBybit(env), syncOKX(env), syncMEXC(env)
-  ]);
-
-  const positions = [
-    ...bnb.positions, ...bybit.positions,
-    ...okx.positions, ...mexc.positions,
-  ];
-  const orders = [
-    ...bnb.orders, ...bybit.orders,
-    ...okx.orders, ...mexc.orders,
-  ];
-  const errors = {
-    binance: bnb.error,
-    bybit:   bybit.error,
-    okx:     okx.error,
-    mexc:    mexc.error,
-  };
-  const totalPnl    = positions.reduce((s, p) => s + (p.pnl || 0), 0);
-  const totalMargin = positions.reduce((s, p) => s + (p.margin || 0), 0);
-
-  // Fetch balances in parallel with sync
   let balanceData = { balances: {}, totals: { USDT: 0, USDC: 0, total: 0 }, errors: {} };
   try { balanceData = await fetchBalances(env); } catch(e) {}
 
   const payload = {
-    positions, orders, errors,
-    totalPnl:     Math.round(totalPnl * 100) / 100,
-    marginInUse:  Math.round(totalMargin * 100) / 100,
+    positions: [],
+    orders: [],
+    errors: balanceData.errors,
+    totalPnl: 0,
+    marginInUse: 0,
     lastSync:     new Date().toISOString(),
-    count: { positions: positions.length, orders: orders.length },
+    count: { positions: 0, orders: 0 },
     balances:     balanceData.balances,
     liquidity:    balanceData.totals,
     balanceErrors: balanceData.errors,
@@ -555,7 +583,10 @@ async function syncAll(env) {
         const prevData = JSON.parse(prev);
         changed = prevData.count?.positions !== payload.count?.positions ||
                   prevData.count?.orders    !== payload.count?.orders    ||
-                  Math.abs((prevData.totalPnl||0) - (payload.totalPnl||0)) > 0.5;
+                  Math.abs((prevData.totalPnl||0) - (payload.totalPnl||0)) > 0.5 ||
+                  JSON.stringify(prevData.balances || {}) !== JSON.stringify(payload.balances || {}) ||
+                  JSON.stringify(prevData.balanceErrors || {}) !== JSON.stringify(payload.balanceErrors || {}) ||
+                  JSON.stringify(prevData.errors || {}) !== JSON.stringify(payload.errors || {});
       } catch(e) {}
     }
     if (changed) {
@@ -611,9 +642,10 @@ export default {
 
     // ── /balance — free liquidity per exchange ───────────────────────────────
     if (url.pathname === '/balance') {
+      const forceLive = url.searchParams.has('live') || url.searchParams.has('t');
       // Try KV cache first (balance is part of summary)
       let cached = null;
-      if (env.MAUEX_CACHE) {
+      if (!forceLive && env.MAUEX_CACHE) {
         const raw = await env.MAUEX_CACHE.get('summary');
         if (raw) {
           try {
