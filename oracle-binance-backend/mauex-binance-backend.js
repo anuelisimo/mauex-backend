@@ -64,10 +64,10 @@ async function getBinanceBalance() {
     return { error: 'BINANCE_KEY/BINANCE_SECRET not set' };
   }
 
-  const query = `recvWindow=10000&timestamp=${Date.now()}`;
-  const signature = hmac256(BINANCE_SECRET, query);
+  const futuresQuery = `recvWindow=10000&timestamp=${Date.now()}`;
+  const futuresSignature = hmac256(BINANCE_SECRET, futuresQuery);
   const response = await safeFetch(
-    `https://fapi.binance.com/fapi/v2/account?${query}&signature=${signature}`,
+    `https://fapi.binance.com/fapi/v2/account?${futuresQuery}&signature=${futuresSignature}`,
     { headers: { 'X-MBX-APIKEY': BINANCE_KEY } }
   );
 
@@ -117,6 +117,30 @@ async function getBinanceBalance() {
     margin = Number(response.data.totalInitialMargin || 0);
     pnl = Number(response.data.totalUnrealizedProfit || 0);
     USDT = total;
+  }
+
+  const spotQuery = `recvWindow=10000&timestamp=${Date.now()}`;
+  const spotSignature = hmac256(BINANCE_SECRET, spotQuery);
+  const spotResponse = await safeFetch(
+    `https://api.binance.com/api/v3/account?${spotQuery}&signature=${spotSignature}`,
+    { headers: { 'X-MBX-APIKEY': BINANCE_KEY } }
+  );
+
+  if (spotResponse.ok && spotResponse.data?.balances) {
+    for (const asset of spotResponse.data.balances) {
+      if (asset.asset !== 'USDT' && asset.asset !== 'USDC') continue;
+      const freeSpot = Number(asset.free || 0);
+      const lockedSpot = Number(asset.locked || 0);
+      const spotTotal = freeSpot + lockedSpot;
+      if (spotTotal <= 0) continue;
+
+      total += spotTotal;
+      wallet += spotTotal;
+      free += freeSpot;
+      orders += lockedSpot;
+      if (asset.asset === 'USDT') USDT += spotTotal;
+      if (asset.asset === 'USDC') USDC += spotTotal;
+    }
   }
 
   return {
@@ -417,17 +441,27 @@ function parseMoney(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function metricAmount(value) {
+  if (value == null) return 0;
+  if (typeof value !== 'object') return parseMoney(value);
+
+  const direct = parseMoney(value.amount ?? value.value ?? value.val ?? value.current ?? value.balance);
+  if (direct) return direct;
+
+  for (const nested of Object.values(value)) {
+    const n = metricAmount(nested);
+    if (n) return n;
+  }
+  return 0;
+}
+
 function pickMetric(source, names) {
   if (!source) return 0;
   const keys = Object.keys(source);
   for (const name of names) {
     const key = keys.find(k => k.toLowerCase() === name.toLowerCase());
     if (!key) continue;
-    const value = source[key];
-    if (value && typeof value === 'object') {
-      return parseMoney(value.amount ?? value.value ?? value.val ?? value.current ?? value);
-    }
-    return parseMoney(value);
+    return metricAmount(source[key]);
   }
   return 0;
 }
@@ -555,6 +589,25 @@ async function getIbkrBalance() {
   };
 }
 
+async function getIbkrDebug() {
+  const status = await getIbkrStatus();
+  const accountsResponse = await ibkrGet('/v1/api/portfolio/accounts');
+  const accountId = pickAccountId(accountsResponse.data || {});
+  const encodedAccount = accountId ? encodeURIComponent(accountId) : '';
+  const summaryResponse = encodedAccount ? await ibkrGet(`/v1/api/portfolio/${encodedAccount}/summary`) : null;
+  const ledgerResponse = encodedAccount ? await ibkrGet(`/v1/api/portfolio/${encodedAccount}/ledger`) : null;
+  const pnlResponse = await ibkrGet('/v1/api/iserver/account/pnl/partitioned');
+
+  return {
+    status,
+    accountId,
+    accounts: accountsResponse?.data || accountsResponse?.raw || accountsResponse?.status,
+    summary: summaryResponse?.data || summaryResponse?.raw || summaryResponse?.status,
+    ledger: ledgerResponse?.data || ledgerResponse?.raw || ledgerResponse?.status,
+    pnl: pnlResponse?.data || pnlResponse?.raw || pnlResponse?.status,
+  };
+}
+
 function sendJson(res, data, status = 200) {
   res.writeHead(status, { 'Content-Type': 'application/json', ...corsHeaders });
   res.end(JSON.stringify(data));
@@ -608,6 +661,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/ibkr-balance') {
       sendJson(res, await getIbkrBalance());
+      return;
+    }
+
+    if (url.pathname === '/ibkr-debug') {
+      sendJson(res, await getIbkrDebug());
       return;
     }
 
