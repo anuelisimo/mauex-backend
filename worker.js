@@ -372,22 +372,10 @@ async function fetchBalances(env) {
     } catch(e) { errors.BINANCE = e.message; }
   }
 
-  // ── Bybit via Railway, if available ─────────────────────────────────────
-  if (railwayUrl) {
-    try {
-      const r = await safeFetch(`${railwayUrl}/bybit-balance`);
-      if (r.ok && r.data && !r.data.error) {
-        balances.BYBIT = normalizeBalance(r.data);
-      } else if (r.data?.error || r.status) {
-        errors.BYBIT = r.data?.error || `${r.status}`;
-      }
-    } catch(e) { errors.BYBIT = e.message; }
-  }
-
-  // ── Bybit direct fallback ────────────────────────────────────────────────
+  // ── Bybit ────────────────────────────────────────────────────────────────
   const bybitKey = (env.BYBIT_KEY || '').trim();
   const bybitSec = (env.BYBIT_SECRET || '').trim();
-  if (!balances.BYBIT && bybitKey && bybitSec) {
+  if (bybitKey && bybitSec) {
     try {
       const bybitBalance = async (accountType) => {
         const ts  = Date.now().toString();
