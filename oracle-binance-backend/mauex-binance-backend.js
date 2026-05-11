@@ -1,5 +1,7 @@
 const http = require('http');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = Number(process.env.PORT || 8080);
 const BINANCE_KEY = (process.env.BINANCE_KEY || '').trim();
@@ -10,6 +12,11 @@ const KUCOIN_PASSPHRASE = (process.env.KUCOIN_PASSPHRASE || '').trim();
 const KUCOIN_KEY_VERSION = (process.env.KUCOIN_KEY_VERSION || '2').trim();
 const IBKR_GATEWAY_URL = (process.env.IBKR_GATEWAY_URL || 'https://127.0.0.1:5000').replace(/\/+$/, '');
 const IBKR_ACCOUNT_ID = (process.env.IBKR_ACCOUNT_ID || '').trim();
+const IBKR_FLEX_TOKEN = (process.env.IBKR_FLEX_TOKEN || '').trim();
+const IBKR_FLEX_QUERY_ID = (process.env.IBKR_FLEX_QUERY_ID || '').trim();
+const IBKR_FLEX_BASE_URL = (process.env.IBKR_FLEX_BASE_URL || 'https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService').replace(/\/+$/, '');
+const IBKR_FLEX_CACHE_HOURS = Number(process.env.IBKR_FLEX_CACHE_HOURS || 20);
+const IBKR_FLEX_CACHE_FILE = process.env.IBKR_FLEX_CACHE_FILE || path.join(__dirname, 'ibkr-flex-cache.json');
 
 if (process.env.IBKR_ALLOW_SELF_SIGNED !== '0') {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -466,6 +473,269 @@ function pickMetric(source, names) {
   return 0;
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function readJsonFile(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeJsonFile(file, value) {
+  try {
+    fs.writeFileSync(file, JSON.stringify(value, null, 2), { mode: 0o600 });
+  } catch {
+    // Cache is an optimization; a write failure should not break the API.
+  }
+}
+
+function htmlDecode(value) {
+  return String(value || '')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function attrsFromXml(fragment) {
+  const attrs = {};
+  const pattern = /([\w:-]+)\s*=\s*"([^"]*)"/g;
+  let match;
+  while ((match = pattern.exec(fragment))) {
+    attrs[match[1]] = htmlDecode(match[2]);
+  }
+  return attrs;
+}
+
+function xmlText(xml, tag) {
+  const match = String(xml || '').match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'));
+  return match ? htmlDecode(match[1].trim()) : '';
+}
+
+function xmlElements(xml, tag) {
+  const result = [];
+  const text = String(xml || '');
+  const pattern = new RegExp(`<${tag}\\b([^>]*?)(?:\\/>|>([\\s\\S]*?)<\\/${tag}>)`, 'gi');
+  let match;
+  while ((match = pattern.exec(text))) {
+    result.push({ attrs: attrsFromXml(match[1] || ''), inner: match[2] || '' });
+  }
+  return result;
+}
+
+function sumXmlAttr(xml, tags, names) {
+  let total = 0;
+  for (const tag of tags) {
+    for (const element of xmlElements(xml, tag)) {
+      total += pickMetric(element.attrs, names);
+    }
+  }
+  return total;
+}
+
+async function flexFetch(pathname, params) {
+  const url = new URL(`${IBKR_FLEX_BASE_URL}${pathname}`);
+  Object.entries(params).forEach(([key, value]) => url.searchParams.set(key, value));
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/xml,text/xml,*/*',
+        'User-Agent': 'Java',
+      },
+    });
+    clearTimeout(timeout);
+    const text = await response.text();
+    return { ok: response.ok, status: response.status, text };
+  } catch (error) {
+    return { ok: false, status: 0, text: error.message };
+  }
+}
+
+function flexFailure(xml, fallback) {
+  const status = xmlText(xml, 'Status');
+  if (status && status.toLowerCase() !== 'success') {
+    const code = xmlText(xml, 'ErrorCode');
+    const message = xmlText(xml, 'ErrorMessage');
+    return `${code ? `${code}: ` : ''}${message || status}`;
+  }
+  return fallback || '';
+}
+
+function parseIbkrFlexStatement(xml) {
+  const accountInfo = xmlElements(xml, 'AccountInformation')[0]?.attrs || {};
+  const statement = xmlElements(xml, 'FlexStatement')[0]?.attrs || {};
+  const accountId = accountInfo.accountId || accountInfo.accountID || accountInfo.clientAccountID || statement.accountId || statement.accountID || IBKR_ACCOUNT_ID || '';
+  const currency = accountInfo.currency || accountInfo.baseCurrency || accountInfo.Currency || 'USD';
+
+  const navTotal = sumXmlAttr(xml, [
+    'ChangeInNAV',
+    'NetAssetValue',
+    'NetAssetValueInBase',
+    'NetAssetValueSummaryInBase',
+    'NetAssetValueNAVInBase',
+    'EquitySummaryInBase',
+    'EquitySummaryByReportDate',
+    'StatementOfFunds',
+    'NAV',
+  ], [
+    'total',
+    'totalInBase',
+    'currentTotal',
+    'endingTotal',
+    'endingValue',
+    'endingNAV',
+    'endingNav',
+    'currentNAV',
+    'currentNav',
+    'value',
+  ]);
+  const marginTotal = sumXmlAttr(xml, ['MarginSummary'], [
+    'currentInitialMargin',
+    'initialMargin',
+    'initMarginReq',
+    'initialMarginRequirement',
+    'totalInitialMargin',
+  ]);
+  const freeTotal = sumXmlAttr(xml, ['MarginSummary'], [
+    'availableFunds',
+    'excessLiquidity',
+    'totalAvailableFunds',
+  ]);
+  const cashTotal = sumXmlAttr(xml, ['CashReportCurrency', 'CashReport', 'StatementOfFunds'], [
+    'endingCash',
+    'endingSettledCash',
+    'settledCash',
+    'cash',
+    'endingBalance',
+    'total',
+    'balance',
+  ]);
+  const openPositionValue = Math.abs(sumXmlAttr(xml, ['OpenPosition'], [
+    'positionValue',
+    'marketValue',
+    'value',
+  ]));
+  const openPnl = sumXmlAttr(xml, ['OpenPosition'], [
+    'fifoPnlUnrealized',
+    'mtmPnl',
+    'unrealizedPNL',
+    'unrealizedPnl',
+  ]);
+
+  const total = navTotal || pickMetric(accountInfo, [
+    'netLiquidationValue',
+    'netLiquidation',
+    'currentNAV',
+    'currentNav',
+    'endingNAV',
+    'endingNav',
+    'equityWithLoanValue',
+  ]);
+  const margin = marginTotal || pickMetric(accountInfo, [
+    'initialMarginRequirement',
+    'currentInitialMargin',
+    'initMarginReq',
+  ]);
+  const free = freeTotal || cashTotal || pickMetric(accountInfo, [
+    'availableFunds',
+    'excessLiquidity',
+    'settledCash',
+    'cash',
+  ]);
+  const workingCapital = total && free <= total ? Math.max(0, total - free) : 0;
+  const effectiveMargin = margin || workingCapital;
+  const orders = margin && total && free + margin <= total ? Math.max(0, total - free - margin) : 0;
+  const pnl = openPnl || pickMetric(accountInfo, ['unrealizedPnl', 'unrealizedPNL']);
+  const safeTotal = total || Math.max(0, free + margin + orders) || cashTotal + openPositionValue;
+
+  if (!safeTotal) {
+    return {
+      error: 'IBKR Flex no trajo NAV/capital. Revisa que la Flex Query incluya Account Information, Net Asset Value, Margin Summary, Cash Report y Open Positions.',
+      accountId,
+      currency,
+    };
+  }
+
+  return {
+    exchange: 'IBKR',
+    source: 'IBKR Flex Web Service',
+    accountId,
+    currency,
+    total: round(safeTotal),
+    wallet: round(safeTotal),
+    free: round(free || Math.max(0, safeTotal - effectiveMargin - orders)),
+    margin: round(effectiveMargin),
+    orders: round(orders),
+    pnl: round(pnl),
+    USDT: round(safeTotal),
+    USDC: 0,
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+async function getIbkrFlexBalance(options = {}) {
+  if (!IBKR_FLEX_TOKEN || !IBKR_FLEX_QUERY_ID) {
+    return { error: 'IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID not set' };
+  }
+
+  const cache = readJsonFile(IBKR_FLEX_CACHE_FILE);
+  const cacheAgeMs = cache?.updatedAt ? Date.now() - new Date(cache.updatedAt).getTime() : Infinity;
+  const cacheFresh = cache?.data && cacheAgeMs < IBKR_FLEX_CACHE_HOURS * 60 * 60 * 1000;
+  if (cacheFresh && !options.live) {
+    return { ...cache.data, cached: true, cacheUpdatedAt: cache.updatedAt };
+  }
+
+  const send = await flexFetch('/SendRequest', { t: IBKR_FLEX_TOKEN, q: IBKR_FLEX_QUERY_ID, v: '3' });
+  if (!send.ok) {
+    if (cache?.data) return { ...cache.data, cached: true, stale: true, warning: `IBKR Flex SendRequest: ${send.status} ${send.text}` };
+    return { error: `IBKR Flex SendRequest: ${send.status} ${send.text}` };
+  }
+
+  const sendFailure = flexFailure(send.text);
+  if (sendFailure) {
+    if (cache?.data) return { ...cache.data, cached: true, stale: true, warning: `IBKR Flex: ${sendFailure}` };
+    return { error: `IBKR Flex: ${sendFailure}` };
+  }
+
+  const referenceCode = xmlText(send.text, 'ReferenceCode');
+  if (!referenceCode) {
+    return { error: 'IBKR Flex no devolvio ReferenceCode', raw: send.text.slice(0, 300) };
+  }
+
+  let report = null;
+  for (const delay of [2500, 5000, 8000]) {
+    await sleep(delay);
+    report = await flexFetch('/GetStatement', { t: IBKR_FLEX_TOKEN, q: referenceCode, v: '3' });
+    const pending = flexFailure(report.text);
+    if (report.ok && !pending) break;
+    if (!/1003|1004|1019|incomplete|progress|not available/i.test(pending || report.text)) break;
+  }
+
+  if (!report?.ok) {
+    if (cache?.data) return { ...cache.data, cached: true, stale: true, warning: `IBKR Flex GetStatement: ${report?.status || 0} ${report?.text || ''}` };
+    return { error: `IBKR Flex GetStatement: ${report?.status || 0} ${report?.text || ''}` };
+  }
+
+  const reportFailure = flexFailure(report.text);
+  if (reportFailure) {
+    if (cache?.data) return { ...cache.data, cached: true, stale: true, warning: `IBKR Flex: ${reportFailure}` };
+    return { error: `IBKR Flex: ${reportFailure}` };
+  }
+
+  const parsed = parseIbkrFlexStatement(report.text);
+  if (!parsed.error) writeJsonFile(IBKR_FLEX_CACHE_FILE, { updatedAt: new Date().toISOString(), data: parsed });
+  return parsed;
+}
+
 function pickAccountId(accounts) {
   const list = Array.isArray(accounts)
     ? accounts
@@ -509,6 +779,19 @@ async function getIbkrStatus() {
 }
 
 async function getIbkrBalance() {
+  if (IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID) {
+    const flex = await getIbkrFlexBalance();
+    if (!flex.error) return flex;
+
+    const gateway = await getIbkrGatewayBalance();
+    if (!gateway.error) return gateway;
+    return { ...flex, gatewayError: gateway.error };
+  }
+
+  return getIbkrGatewayBalance();
+}
+
+async function getIbkrGatewayBalance() {
   const status = await getIbkrStatus();
   const authData = status.auth || {};
   const authenticated = authData.authenticated !== false && authData.connected !== false;
@@ -590,6 +873,10 @@ async function getIbkrBalance() {
 }
 
 async function getIbkrDebug() {
+  const flexCache = readJsonFile(IBKR_FLEX_CACHE_FILE);
+  const flex = IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID
+    ? await getIbkrFlexBalance({ live: true })
+    : { error: 'IBKR_FLEX_TOKEN/IBKR_FLEX_QUERY_ID not set' };
   const status = await getIbkrStatus();
   const accountsResponse = await ibkrGet('/v1/api/portfolio/accounts');
   const accountId = pickAccountId(accountsResponse.data || {});
@@ -599,6 +886,12 @@ async function getIbkrDebug() {
   const pnlResponse = await ibkrGet('/v1/api/iserver/account/pnl/partitioned');
 
   return {
+    flex: {
+      configured: Boolean(IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID),
+      queryId: IBKR_FLEX_QUERY_ID || null,
+      cacheUpdatedAt: flexCache?.updatedAt || null,
+      result: flex,
+    },
     status,
     accountId,
     accounts: accountsResponse?.data || accountsResponse?.raw || accountsResponse?.status,
@@ -630,6 +923,8 @@ const server = http.createServer(async (req, res) => {
         hasBinanceKey: Boolean(BINANCE_KEY),
         hasKucoinKey: Boolean(KUCOIN_KEY),
         hasIbkrGateway: Boolean(IBKR_GATEWAY_URL),
+        hasIbkrFlex: Boolean(IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID),
+        ibkrMode: IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID ? 'flex' : 'gateway',
       });
       return;
     }
@@ -661,6 +956,11 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/ibkr-balance') {
       sendJson(res, await getIbkrBalance());
+      return;
+    }
+
+    if (url.pathname === '/ibkr-flex-balance') {
+      sendJson(res, await getIbkrFlexBalance({ live: url.searchParams.get('live') === '1' }));
       return;
     }
 
