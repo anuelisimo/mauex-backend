@@ -17,6 +17,9 @@ const IBKR_FLEX_QUERY_ID = (process.env.IBKR_FLEX_QUERY_ID || '').trim();
 const IBKR_FLEX_BASE_URL = (process.env.IBKR_FLEX_BASE_URL || 'https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService').replace(/\/+$/, '');
 const IBKR_FLEX_CACHE_HOURS = Number(process.env.IBKR_FLEX_CACHE_HOURS || 20);
 const IBKR_FLEX_CACHE_FILE = process.env.IBKR_FLEX_CACHE_FILE || path.join(__dirname, 'ibkr-flex-cache.json');
+const SIGNAL_AI_PROVIDER = (process.env.SIGNAL_AI_PROVIDER || 'ollama').trim().toLowerCase();
+const SIGNAL_AI_MODEL = (process.env.SIGNAL_AI_MODEL || 'moondream').trim();
+const SIGNAL_AI_BASE_URL = (process.env.SIGNAL_AI_BASE_URL || 'http://127.0.0.1:11434').replace(/\/+$/, '');
 
 if (process.env.IBKR_ALLOW_SELF_SIGNED !== '0') {
   process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
@@ -493,6 +496,164 @@ function writeJsonFile(file, value) {
   }
 }
 
+function readRequestJson(req, maxBytes = 4 * 1024 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', chunk => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        reject(new Error('Request demasiado grande para AI visual'));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      try {
+        const text = Buffer.concat(chunks).toString('utf8') || '{}';
+        resolve(JSON.parse(text));
+      } catch (error) {
+        reject(new Error('JSON invalido'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+function textSignalFallback(raw = '', sourceName = '') {
+  const text = String(raw || '');
+  const ticker = (text.match(/(?:COIN|SYMBOL|PAIR)\s*[:=]?\s*[$#]?([A-Z0-9]{2,15})/i)
+    || text.match(/[$#]([A-Z0-9]{2,15})\s*(?:\/|-)?\s*(?:USDT|USDC|USD|PERP)?/i)
+    || [])[1] || '';
+  const direction = (text.match(/\b(LONG|SHORT)\b/i) || [])[1] || '';
+  const numsFrom = label => {
+    const m = text.match(new RegExp(`(?:${label})\\s*[:=]?\\s*([^\\n]+)`, 'i'));
+    return ((m?.[1] || '').match(/(?:\d+\.\d+|\.\d+|\d+)/g) || [])
+      .map(x => Number(x.startsWith('.') ? '0' + x : x))
+      .filter(Number.isFinite);
+  };
+  const entry = numsFrom('ENTRY|ENTRADA|CMP|CURRENT MARKET');
+  const sl = numsFrom('STOP LOSS|STOPLOSS|SL');
+  const targets = numsFrom('TARGETS?|TAKE PROFIT|TP');
+  return {
+    ticker,
+    direction: direction.toLowerCase(),
+    exchange: /kucoin/i.test(text) ? 'KUCOIN' : 'BINANCE',
+    leverage: Number((text.match(/(?:\d+\s*-\s*)?(\d{1,3})\s*x/i) || [])[1] || 0) || undefined,
+    entryRange: entry.slice(0, 2),
+    entry: entry[0] || undefined,
+    sl: sl[0] || undefined,
+    targets,
+    providerSignalId: (text.match(/(?:signal\s*id|signal)\s*[:#]?\s*#?([A-Z]?\d{2,8})/i) || [])[1] || '',
+    confidence: 35,
+    warnings: ['AI visual local no disponible; lectura de texto basica'],
+    notes: `Fallback sin vision para ${sourceName || 'Telegram'}.`,
+  };
+}
+
+function extractJsonObject(text) {
+  const raw = String(text || '').trim();
+  try { return JSON.parse(raw); } catch {}
+  const start = raw.indexOf('{');
+  const end = raw.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try { return JSON.parse(raw.slice(start, end + 1)); } catch {}
+  }
+  return null;
+}
+
+async function callOllamaVision({ raw, sourceName, imageBase64 }) {
+  const prompt = `
+Sos el lector visual de Signal Desk. Tu tarea es extraer una senal de trading desde texto de Telegram y, si hay imagen, desde captura de TradingView.
+
+Reglas:
+- Devolve SOLO JSON valido.
+- No inventes datos. Si algo no esta claro, usa null o [] y agregalo en warnings.
+- Si texto e imagen se contradicen, conserva ambos en notes y baja confidence.
+- direction debe ser "long", "short" o "".
+- entryRange debe tener 1 o 2 numeros.
+- targets debe tener todos los TP visibles o escritos.
+- Si Entry dice CMP/current market, pon entryIsCurrentMarket true.
+- El campo confidence mide confianza de lectura, no probabilidad de ganar.
+
+Fuente: ${sourceName || 'Telegram'}
+Texto:
+${raw || '(sin texto)'}
+
+Formato esperado:
+{
+  "ticker": "BTC",
+  "direction": "long",
+  "exchange": "BINANCE",
+  "leverage": 5,
+  "entry": 72000,
+  "entryRange": [71000,72000],
+  "entryIsCurrentMarket": false,
+  "sl": 69000,
+  "targets": [73000,75000],
+  "providerSignalId": "B326",
+  "confidence": 70,
+  "warnings": [],
+  "notes": "resumen breve"
+}`.trim();
+
+  const response = await fetch(`${SIGNAL_AI_BASE_URL}/api/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: SIGNAL_AI_MODEL,
+      prompt,
+      stream: false,
+      format: 'json',
+      images: imageBase64 ? [imageBase64] : undefined,
+      options: {
+        temperature: 0.1,
+        num_predict: 700,
+      },
+    }),
+  });
+  const text = await response.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch {}
+  if (!response.ok) throw new Error(data?.error || text.slice(0, 300) || `Ollama HTTP ${response.status}`);
+  const parsed = extractJsonObject(data?.response || text);
+  if (!parsed) throw new Error('Ollama no devolvio JSON interpretable');
+  return parsed;
+}
+
+async function interpretSignalVision(payload = {}) {
+  const raw = String(payload.raw || '');
+  const sourceName = String(payload.sourceName || '');
+  const imageBase64 = String(payload.imageBase64 || '').replace(/^data:image\/[a-z0-9.+-]+;base64,/i, '');
+  if (SIGNAL_AI_PROVIDER !== 'ollama') {
+    return {
+      model: 'fallback',
+      usedImage: false,
+      interpretation: textSignalFallback(raw, sourceName),
+      warning: `Proveedor AI no soportado: ${SIGNAL_AI_PROVIDER}`,
+    };
+  }
+
+  try {
+    const interpretation = await callOllamaVision({ raw, sourceName, imageBase64 });
+    return {
+      model: SIGNAL_AI_MODEL,
+      provider: 'ollama',
+      usedImage: !!imageBase64,
+      interpretation,
+    };
+  } catch (error) {
+    return {
+      model: SIGNAL_AI_MODEL,
+      provider: 'ollama',
+      usedImage: false,
+      interpretation: textSignalFallback(raw, sourceName),
+      warning: error.message,
+    };
+  }
+}
+
 function htmlDecode(value) {
   return String(value || '')
     .replace(/&quot;/g, '"')
@@ -925,6 +1086,8 @@ const server = http.createServer(async (req, res) => {
         hasIbkrGateway: Boolean(IBKR_GATEWAY_URL),
         hasIbkrFlex: Boolean(IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID),
         ibkrMode: IBKR_FLEX_TOKEN && IBKR_FLEX_QUERY_ID ? 'flex' : 'gateway',
+        signalAiProvider: SIGNAL_AI_PROVIDER,
+        signalAiModel: SIGNAL_AI_MODEL,
       });
       return;
     }
@@ -966,6 +1129,12 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/ibkr-debug') {
       sendJson(res, await getIbkrDebug());
+      return;
+    }
+
+    if (url.pathname === '/signal-vision-ai' && req.method === 'POST') {
+      const payload = await readRequestJson(req);
+      sendJson(res, await interpretSignalVision(payload));
       return;
     }
 
